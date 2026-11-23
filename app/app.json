@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "PetTV",
+    "slug": "pettv",
+    "version": "1.0.0",
+    "scheme": "pettv",
+    "android": {
+      "package": "com.pettv.app",
+      "googleServicesFile": "./google-services.json"
+    },
+    "plugins": [
+      "expo-router",
+      "@react-native-google-signin/google-signin"
+    ]
+  }
+}
