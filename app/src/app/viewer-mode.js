@@ -3,10 +3,11 @@ import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'rea
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
-import { ref, onValue } from 'firebase/database';
-import { auth, db, DB_URL } from '../config';
+import { ref, onValue, remove } from 'firebase/database';
+import { auth, db } from '../config';
+import { signalingScript, useSignalingToken } from '../webview-signaling';
 
-function buildViewerHtml(idToken, myUid) {
+function buildViewerHtml(idToken, myUid, myName) {
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -22,79 +23,39 @@ video{width:100vw;height:100vh;object-fit:cover}
 <video id="v" autoplay playsinline></video>
 <div id="st">Connecting...</div>
 <script>
-const TOKEN='${idToken}';
-const UID='${myUid}';
-const DB='${DB_URL}';
-const ICE=[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'}];
+${signalingScript(idToken, myUid)}
+const REQ=Date.now()+'-'+Math.random().toString(36).slice(2,8);
+const NAME=${JSON.stringify(myName).replace(/</g, '\\u003c')};
+let pc=null;
 
-function st(msg){
-  document.getElementById('st').textContent=msg;
-  if(window.ReactNativeWebView)window.ReactNativeWebView.postMessage(JSON.stringify({t:'s',m:msg}));
-}
+function lost(msg){st(msg);post({t:'lost',m:msg});}
 
-async function dbw(path,method,data){
-  const r=await fetch(DB+path+'?auth='+TOKEN,{
-    method:method||'GET',
-    headers:{'Content-Type':'application/json'},
-    ...(data!==undefined?{body:JSON.stringify(data)}:{})
-  });
-  if(!r.ok)throw new Error('DB '+method+' '+path+' '+r.status+' '+(await r.text()));
-  return r.json();
-}
-
-function sse(path,cb){
-  const es=new EventSource(DB+path+'?auth='+TOKEN);
-  es.addEventListener('put',e=>{try{const d=JSON.parse(e.data);cb('put',d.path,d.data);}catch(_){}});
-  es.addEventListener('patch',e=>{try{const d=JSON.parse(e.data);cb('patch',d.path,d.data);}catch(_){}});
-  es.addEventListener('cancel',e=>st('Listen denied: '+path+' '+e.data));
-  return es;
-}
-
-// Firebase SSE reports changes relative to the listened path; returns changed top-level children
-function kids(type,path,data){
-  const p=path.split('/').filter(Boolean);
-  if(p.length===0)return data&&typeof data==='object'?Object.entries(data):[];
-  if(p.length===1&&type==='put')return [[p[0],data]];
-  return [];
-}
-
-let started=false;
 async function connect(){
   st('Requesting stream...');
-  await dbw('/sessions/'+UID+'.json','PUT',{request:true});
+  await dbw('/sessions/'+UID+'.json','PUT',{request:REQ,name:NAME});
   st('Waiting for home phone...');
-
-  sse('/sessions/'+UID+'/offer.json',(type,path,offerSdp)=>{
-    if(typeof offerSdp!=='string'||started)return;
-    started=true;
-    startPc(offerSdp).catch(e=>st('Error: '+e.message));
+  const offerListener=sse('/sessions/'+UID+'/offer.json',(type,path,sdp)=>{
+    if(typeof sdp!=='string'||pc)return;
+    offerListener.close();
+    startPc(sdp).catch(e=>lost('Error: '+e.message));
   });
 }
 
 async function startPc(offerSdp){
   st('Creating connection...');
-  const pc=new RTCPeerConnection({iceServers:ICE});
+  pc=new RTCPeerConnection({iceServers:ICE});
 
   pc.ontrack=e=>{
-    if(e.streams&&e.streams[0]){
-      document.getElementById('v').srcObject=e.streams[0];
-      document.getElementById('st').style.display='none';
-      if(window.ReactNativeWebView)window.ReactNativeWebView.postMessage(JSON.stringify({t:'connected'}));
-    }
+    if(e.streams&&e.streams[0])document.getElementById('v').srcObject=e.streams[0];
   };
-
   pc.onconnectionstatechange=()=>{
     const s=pc.connectionState;
-    if(s==='failed'||s==='disconnected'||s==='closed'){
-      st('Connection lost');
-      if(window.ReactNativeWebView)window.ReactNativeWebView.postMessage(JSON.stringify({t:'lost'}));
-    }
+    if(s==='connected'){document.getElementById('st').style.display='none';post({t:'connected'});}
+    else if(s==='disconnected'){document.getElementById('st').style.display='';st('Reconnecting...');}
+    else if(s==='failed')lost('Connection lost');
   };
-
   pc.onicecandidate=({candidate})=>{
-    if(candidate){
-      dbw('/sessions/'+UID+'/ice_viewer.json','POST',candidate.toJSON()).catch(()=>{});
-    }
+    if(candidate)dbw('/sessions/'+UID+'/ice_viewer.json','POST',candidate.toJSON()).catch(()=>{});
   };
 
   await pc.setRemoteDescription({type:'offer',sdp:offerSdp});
@@ -106,62 +67,78 @@ async function startPc(offerSdp){
   const added=new Set();
   sse('/sessions/'+UID+'/ice_home.json',(type,path,data)=>{
     for(const[k,c]of kids(type,path,data)){
-      if(!added.has(k)&&c&&c.candidate){
-        added.add(k);
-        pc.addIceCandidate(c).catch(()=>{});
-      }
+      if(added.has(k)||!c||!c.candidate)continue;
+      added.add(k);
+      pc.addIceCandidate(c).catch(()=>{});
     }
   });
 }
 
-connect().catch(e=>st('Fatal: '+e.message));
+connect().catch(e=>lost('Error: '+e.message));
 </script>
 </body>
 </html>`;
 }
 
 export default function ViewerModeScreen() {
-  const [phase, setPhase] = useState('idle');
+  const webRef = useRef(null);
+  const { token, error, pushFreshToken } = useSignalingToken(webRef);
+  const [phase, setPhase] = useState('idle'); // idle | connecting | connected | error
+  const [attempt, setAttempt] = useState(0);
   const [homeOnline, setHomeOnline] = useState(null);
   const [statusMsg, setStatusMsg] = useState('');
-  const [idToken, setIdToken] = useState(null);
   const myUid = auth.currentUser?.uid;
 
+  function endSession() {
+    return remove(ref(db, `/sessions/${myUid}`)).catch(() => {});
+  }
+
   useEffect(() => {
-    const hbUnsub = onValue(ref(db, '/heartbeat'), (snap) => {
-      setHomeOnline(snap.exists());
-    });
-    auth.currentUser?.getIdToken(true).then(setIdToken).catch(() => {});
-    return () => hbUnsub();
+    const hbUnsub = onValue(ref(db, '/heartbeat'), (snap) => setHomeOnline(snap.exists()));
+    return () => {
+      hbUnsub();
+      endSession();
+    };
   }, []);
+
+  async function watch() {
+    setStatusMsg('');
+    await endSession();
+    setAttempt(a => a + 1);
+    setPhase('connecting');
+  }
+
+  function disconnect() {
+    setPhase('idle');
+    setStatusMsg('');
+    endSession();
+  }
+
+  async function switchRole() {
+    await endSession();
+    await AsyncStorage.removeItem('role');
+    router.replace('/role-picker');
+  }
 
   function onMessage(e) {
     try {
       const msg = JSON.parse(e.nativeEvent.data);
       if (msg.t === 's') setStatusMsg(msg.m);
-      else if (msg.t === 'connected') { setPhase('connected'); setStatusMsg(''); }
-      else if (msg.t === 'lost') { setPhase('error'); setStatusMsg('Connection lost'); }
+      else if (msg.t === 'connected') setPhase('connected');
+      else if (msg.t === 'lost') { setPhase('error'); setStatusMsg(msg.m); endSession(); }
+      else if (msg.t === 'needToken') pushFreshToken();
     } catch {}
   }
 
-  async function disconnect() {
-    setPhase('idle');
-    setStatusMsg('');
-  }
-
-  async function switchRole() {
-    await AsyncStorage.removeItem('role');
-    router.replace('/role-picker');
-  }
-
-  if ((phase === 'connecting' || phase === 'connected') && idToken) {
+  if ((phase === 'connecting' || phase === 'connected') && token) {
     return (
       <View style={styles.fullscreen}>
         <WebView
-          source={{ html: buildViewerHtml(idToken, myUid), baseUrl: 'https://localhost' }}
+          key={attempt}
+          ref={webRef}
+          source={{ html: buildViewerHtml(token, myUid, auth.currentUser?.displayName || auth.currentUser?.email || 'Android viewer'), baseUrl: 'https://localhost' }}
           style={styles.video}
           javaScriptEnabled={true}
-          domStorageEnabled={true}
           mediaPlaybackRequiresUserAction={false}
           allowsInlineMediaPlayback={true}
           originWhitelist={['*']}
@@ -179,30 +156,29 @@ export default function ViewerModeScreen() {
       <Text style={styles.emoji}>📱</Text>
       <Text style={styles.title}>PetTV</Text>
 
-      {homeOnline === null && <ActivityIndicator color="#4A90E2" />}
+      {!!error && <Text style={styles.errorDetail}>Auth error: {error}</Text>}
 
-      {homeOnline === false && (
+      {(homeOnline === null || !token) && !error && <ActivityIndicator color="#4A90E2" />}
+
+      {homeOnline === false && phase !== 'error' && (
         <Text style={styles.offlineText}>Home phone is offline</Text>
       )}
 
-      {homeOnline === true && phase === 'idle' && (
-        <TouchableOpacity
-          style={styles.connectBtn}
-          onPress={() => { if (idToken) setPhase('connecting'); }}
-        >
+      {homeOnline === true && token && phase === 'idle' && (
+        <TouchableOpacity style={styles.connectBtn} onPress={watch}>
           <Text style={styles.connectText}>▶  Watch Live</Text>
         </TouchableOpacity>
       )}
-
-      {phase === 'connecting' && !idToken && <ActivityIndicator color="#4A90E2" />}
 
       {phase === 'error' && (
         <>
           <Text style={styles.errorText}>Connection failed</Text>
           {!!statusMsg && <Text style={styles.errorDetail}>{statusMsg}</Text>}
-          <TouchableOpacity style={styles.connectBtn} onPress={() => setPhase('connecting')}>
-            <Text style={styles.connectText}>Retry</Text>
-          </TouchableOpacity>
+          {homeOnline && (
+            <TouchableOpacity style={styles.connectBtn} onPress={watch}>
+              <Text style={styles.connectText}>Retry</Text>
+            </TouchableOpacity>
+          )}
         </>
       )}
 

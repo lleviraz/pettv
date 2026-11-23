@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, StatusBar } from 'react-native';
 import { WebView } from 'react-native-webview';
+import { useKeepAwake } from 'expo-keep-awake';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
-import { ref, remove } from 'firebase/database';
-import { auth, db, DB_URL } from '../config';
+import { ref, remove, set, onValue, onDisconnect, serverTimestamp } from 'firebase/database';
+import { auth, db } from '../config';
+import { signalingScript, useSignalingToken } from '../webview-signaling';
 
 function buildHomeHtml(idToken, uid) {
   return `<!DOCTYPE html>
@@ -15,133 +17,99 @@ function buildHomeHtml(idToken, uid) {
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#000;overflow:hidden;font-family:sans-serif}
 video{width:100vw;height:100vh;object-fit:cover;transform:scaleX(-1)}
-#st{position:fixed;top:16px;left:10px;right:10px;color:#fff;font-size:14px;font-weight:600;background:rgba(0,0,0,0.55);padding:6px 10px;border-radius:6px;pointer-events:none}
 </style>
 </head>
 <body>
 <video id="v" autoplay playsinline muted></video>
-<div id="st">Starting...</div>
 <script>
-const TOKEN='${idToken}';
-const UID='${uid}';
-const DB='${DB_URL}';
-const ICE=[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'}];
-const pcs={};
-const answerListeners={};
-const iceListeners={};
+${signalingScript(idToken, uid)}
+const viewers={};
+let stream;
 
-function st(msg){
-  document.getElementById('st').textContent=msg;
-  if(window.ReactNativeWebView)window.ReactNativeWebView.postMessage(JSON.stringify({t:'s',m:msg}));
+function updateCount(){
+  const names=Object.values(viewers).filter(v=>v.pc.connectionState==='connected').map(v=>v.name);
+  const n=names.length;
+  st(n>0?n+' viewer'+(n!==1?'s':'')+' watching':'Online');
+  post({t:'viewers',names});
 }
 
-async function dbw(path,method,data){
-  const r=await fetch(DB+path+'?auth='+TOKEN,{
-    method:method||'GET',
-    headers:{'Content-Type':'application/json'},
-    ...(data!==undefined?{body:JSON.stringify(data)}:{})
-  });
-  if(!r.ok)throw new Error('DB '+method+' '+path+' '+r.status+' '+(await r.text()));
-  return r.json();
-}
-
-function sse(path,cb){
-  const es=new EventSource(DB+path+'?auth='+TOKEN);
-  es.addEventListener('put',e=>{try{const d=JSON.parse(e.data);cb('put',d.path,d.data);}catch(_){}});
-  es.addEventListener('patch',e=>{try{const d=JSON.parse(e.data);cb('patch',d.path,d.data);}catch(_){}});
-  es.addEventListener('cancel',e=>st('Listen denied: '+path+' '+e.data));
-  return es;
-}
-
-// Firebase SSE reports changes relative to the listened path; returns changed top-level children
-function kids(type,path,data){
-  const p=path.split('/').filter(Boolean);
-  if(p.length===0)return data&&typeof data==='object'?Object.entries(data):[];
-  if(p.length===1&&type==='put')return [[p[0],data]];
-  return [];
+function closeViewer(vid){
+  const v=viewers[vid];
+  if(!v)return;
+  delete viewers[vid];
+  v.listeners.forEach(l=>l.close());
+  v.pc.close();
+  updateCount();
 }
 
 async function start(){
   st('Starting camera...');
-  let stream;
   try{
     stream=await navigator.mediaDevices.getUserMedia({
       audio:true,
       video:{facingMode:'user',width:{ideal:640},height:{ideal:480},frameRate:{ideal:15}}
     });
-  }catch(e){
-    st('Camera error: '+e.message);
-    return;
-  }
+  }catch(e){st('Camera error: '+e.message);return;}
   document.getElementById('v').srcObject=stream;
-  st('Online');
 
-  try{
-    await dbw('/sessions.json','DELETE');
-    await dbw('/heartbeat.json','PUT',{ts:Date.now(),uid:UID});
-  }catch(e){st(e.message);return;}
+  try{await dbw('/sessions.json','DELETE');}catch(e){st(e.message);return;}
+  st('Online');
+  post({t:'ready'});
 
   sse('/sessions.json',(type,path,data)=>{
-    for(const[vid,session]of kids(type,path,data)){
-      if(session&&session.request&&!pcs[vid]){
-        handleViewer(vid,stream).catch(e=>st('Viewer err: '+e.message));
+    for(const[vid,s]of kids(type,path,data)){
+      if(!s){closeViewer(vid);continue;}
+      // Each viewer attempt writes a fresh request id and no offer; anything else is our own write echoing back
+      if(s.request&&!s.offer&&viewers[vid]?.reqId!==s.request){
+        closeViewer(vid);
+        handleViewer(vid,s.request,s.name).catch(e=>st('Viewer err: '+e.message));
       }
     }
   });
 }
 
-async function handleViewer(vid,stream){
+async function handleViewer(vid,reqId,name){
   const pc=new RTCPeerConnection({iceServers:ICE});
-  pcs[vid]=pc;
+  const v={pc,reqId,name:String(name||'Unknown viewer').slice(0,60),listeners:[]};
+  viewers[vid]=v;
+  const live=()=>viewers[vid]===v;
   stream.getTracks().forEach(t=>pc.addTrack(t,stream));
 
   pc.onicecandidate=({candidate})=>{
-    if(candidate){
-      dbw('/sessions/'+vid+'/ice_home.json','POST',candidate.toJSON()).catch(()=>{});
-    }
+    if(candidate&&live())dbw('/sessions/'+vid+'/ice_home.json','POST',candidate.toJSON()).catch(()=>{});
   };
-
   pc.onconnectionstatechange=()=>{
     const s=pc.connectionState;
-    if(s==='connected'){
-      const n=Object.keys(pcs).length;
-      st(n+' viewer'+(n!==1?'s':'')+' watching');
-      if(window.ReactNativeWebView)window.ReactNativeWebView.postMessage(JSON.stringify({t:'vc',n}));
-    }else if(s==='failed'||s==='closed'||s==='disconnected'){
-      delete pcs[vid];
-      if(answerListeners[vid]){answerListeners[vid].close();delete answerListeners[vid];}
-      if(iceListeners[vid]){iceListeners[vid].close();delete iceListeners[vid];}
-      const n=Object.keys(pcs).length;
-      st(n>0?n+' viewer'+(n!==1?'s':'')+' watching':'Online');
-      if(window.ReactNativeWebView)window.ReactNativeWebView.postMessage(JSON.stringify({t:'vc',n}));
-    }
+    if((s==='failed'||s==='closed')&&live())closeViewer(vid);
+    else updateCount();
   };
 
   const offer=await pc.createOffer();
   await pc.setLocalDescription(offer);
+  if(!live())return;
   await dbw('/sessions/'+vid+'/offer.json','PUT',offer.sdp);
 
+  // Viewer candidates can arrive before its answer; hold them until the remote description is set
   const pending=[];
   let answered=false;
-  answerListeners[vid]=sse('/sessions/'+vid+'/answer.json',async(type,path,data)=>{
-    if(typeof data!=='string'||answered)return;
+  v.listeners.push(sse('/sessions/'+vid+'/answer.json',async(type,path,sdp)=>{
+    if(typeof sdp!=='string'||answered||!live())return;
     answered=true;
     try{
-      await pc.setRemoteDescription({type:'answer',sdp:data});
+      await pc.setRemoteDescription({type:'answer',sdp});
       pending.splice(0).forEach(c=>pc.addIceCandidate(c).catch(()=>{}));
     }catch(e){st('Answer err: '+e.message);}
-  });
+  }));
 
   const added=new Set();
-  iceListeners[vid]=sse('/sessions/'+vid+'/ice_viewer.json',(type,path,data)=>{
+  v.listeners.push(sse('/sessions/'+vid+'/ice_viewer.json',(type,path,data)=>{
     for(const[k,c]of kids(type,path,data)){
-      if(!added.has(k)&&c&&c.candidate){
-        added.add(k);
-        if(pc.remoteDescription)pc.addIceCandidate(c).catch(()=>{});
-        else pending.push(c);
-      }
+      if(added.has(k)||!c||!c.candidate)continue;
+      added.add(k);
+      if(pc.remoteDescription)pc.addIceCandidate(c).catch(()=>{});
+      else pending.push(c);
     }
-  });
+  }));
 }
 
 start().catch(e=>st('Fatal: '+e.message));
@@ -151,24 +119,37 @@ start().catch(e=>st('Fatal: '+e.message));
 }
 
 export default function HomeModeScreen() {
-  const [idToken, setIdToken] = useState(null);
+  useKeepAwake();
+  const webRef = useRef(null);
+  const { token, error, pushFreshToken } = useSignalingToken(webRef);
   const [status, setStatus] = useState('Loading...');
-  const [viewerCount, setViewerCount] = useState(0);
+  const [viewers, setViewers] = useState([]);
+  const [cameraReady, setCameraReady] = useState(false);
   const uid = auth.currentUser?.uid;
 
+  // Presence: Firebase drops /heartbeat if this phone loses its connection; re-set it on every reconnect
   useEffect(() => {
-    auth.currentUser?.getIdToken(true)
-      .then(setIdToken)
-      .catch(e => setStatus('Auth error: ' + (e?.message ?? String(e))));
+    if (!cameraReady) return;
+    const hbRef = ref(db, '/heartbeat');
+    const unsub = onValue(ref(db, '.info/connected'), async (snap) => {
+      if (snap.val() !== true) return;
+      try {
+        await onDisconnect(hbRef).remove();
+        await set(hbRef, { ts: serverTimestamp(), uid });
+      } catch (e) {
+        setStatus('Heartbeat error: ' + (e?.message ?? String(e)));
+      }
+    });
     return () => {
-      remove(ref(db, '/heartbeat')).catch(() => {});
+      unsub();
+      onDisconnect(hbRef).cancel().catch(() => {});
+      remove(hbRef).catch(() => {});
       remove(ref(db, '/sessions')).catch(() => {});
     };
-  }, []);
+  }, [cameraReady]);
 
   async function stop() {
-    await remove(ref(db, '/heartbeat')).catch(() => {});
-    await remove(ref(db, '/sessions')).catch(() => {});
+    setCameraReady(false);
     await AsyncStorage.removeItem('role');
     router.replace('/role-picker');
   }
@@ -177,95 +158,108 @@ export default function HomeModeScreen() {
     try {
       const msg = JSON.parse(e.nativeEvent.data);
       if (msg.t === 's') setStatus(msg.m);
-      else if (msg.t === 'vc') setViewerCount(msg.n);
+      else if (msg.t === 'viewers') setViewers(msg.names);
+      else if (msg.t === 'ready') setCameraReady(true);
+      else if (msg.t === 'needToken') pushFreshToken();
     } catch {}
   }
 
-  if (!idToken) {
+  if (!token) {
     return (
       <View style={styles.loading}>
         <StatusBar barStyle="light-content" backgroundColor="#000" />
-        <Text style={styles.loadingText}>{status}</Text>
+        <Text style={styles.loadingText}>{error ? 'Auth error: ' + error : status}</Text>
       </View>
     );
   }
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#000" />
-      <WebView
-        source={{ html: buildHomeHtml(idToken, uid), baseUrl: 'https://localhost' }}
-        style={styles.webview}
-        mediaPlaybackRequiresUserAction={false}
-        allowsInlineMediaPlayback={true}
-        javaScriptEnabled={true}
-        domStorageEnabled={true}
-        originWhitelist={['*']}
-        mixedContentMode="always"
-        onPermissionRequest={(request) => { if (request.grant) request.grant(request.resources); }}
-        onMessage={onMessage}
-        allowFileAccessFromFileURLs={true}
-        allowUniversalAccessFromFileURLs={true}
-      />
-      <View style={styles.bottomOverlay}>
-        <View style={styles.statusRow}>
-          <View style={styles.onlineDot} />
-          <Text style={styles.statusText}>{status}</Text>
-          {viewerCount > 0 && (
-            <View style={styles.viewerBadge}>
-              <Text style={styles.viewerText}>👁 {viewerCount}</Text>
-            </View>
-          )}
-        </View>
-        <TouchableOpacity style={styles.stopBtn} onPress={stop}>
-          <Text style={styles.stopText}>Stop &amp; Switch Role</Text>
-        </TouchableOpacity>
+      <StatusBar barStyle="light-content" backgroundColor="#111" />
+      <View style={styles.statusRow}>
+        <View style={[styles.onlineDot, !cameraReady && styles.offlineDot]} />
+        <Text style={styles.statusText}>{status}</Text>
       </View>
+
+      <View style={styles.preview}>
+        <WebView
+          ref={webRef}
+          source={{ html: buildHomeHtml(token, uid), baseUrl: 'https://localhost' }}
+          style={styles.webview}
+          mediaPlaybackRequiresUserAction={false}
+          allowsInlineMediaPlayback={true}
+          javaScriptEnabled={true}
+          originWhitelist={['*']}
+          onPermissionRequest={(request) => { if (request.grant) request.grant(request.resources); }}
+          onMessage={onMessage}
+        />
+      </View>
+
+      <View style={styles.viewersBox}>
+        <Text style={styles.viewersTitle}>Watching now ({viewers.length})</Text>
+        {viewers.length === 0 ? (
+          <Text style={styles.noViewers}>No one is watching</Text>
+        ) : (
+          viewers.map((name, i) => (
+            <View key={i} style={styles.viewerRow}>
+              <Text style={styles.viewerIcon}>👁</Text>
+              <Text style={styles.viewerName} numberOfLines={1}>{name}</Text>
+            </View>
+          ))
+        )}
+      </View>
+
+      <TouchableOpacity style={styles.stopBtn} onPress={stop}>
+        <Text style={styles.stopText}>Stop &amp; Switch Role</Text>
+      </TouchableOpacity>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000' },
-  webview: { flex: 1 },
-  loading: { flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' },
-  loadingText: { color: '#fff', fontSize: 16 },
-
-  bottomOverlay: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    paddingBottom: 48,
-    paddingTop: 16,
+  container: {
+    flex: 1,
+    backgroundColor: '#111',
+    paddingTop: 52,
+    paddingBottom: 40,
     paddingHorizontal: 24,
-    alignItems: 'center',
-    gap: 12,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    gap: 20,
   },
-  statusRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    alignSelf: 'stretch',
-  },
+  loading: { flex: 1, backgroundColor: '#111', justifyContent: 'center', alignItems: 'center', padding: 24 },
+  loadingText: { color: '#fff', fontSize: 16, textAlign: 'center' },
+
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   onlineDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#2ecc71' },
+  offlineDot: { backgroundColor: '#e67e22' },
   statusText: { flex: 1, color: '#fff', fontSize: 15, fontWeight: '600' },
-  viewerBadge: {
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
+
+  preview: {
+    width: 150,
+    height: 200,
+    alignSelf: 'center',
+    borderRadius: 16,
+    overflow: 'hidden',
+    backgroundColor: '#000',
   },
-  viewerText: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  webview: { flex: 1, backgroundColor: '#000' },
+
+  viewersBox: {
+    flex: 1,
+    backgroundColor: '#1c1c1e',
+    borderRadius: 14,
+    padding: 16,
+    gap: 10,
+  },
+  viewersTitle: { color: '#aaa', fontSize: 13, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 },
+  noViewers: { color: '#666', fontSize: 15 },
+  viewerRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  viewerIcon: { fontSize: 15 },
+  viewerName: { flex: 1, color: '#fff', fontSize: 16 },
+
   stopBtn: {
-    paddingHorizontal: 28,
     paddingVertical: 14,
     borderRadius: 12,
     backgroundColor: 'rgba(192,57,43,0.85)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.15)',
-    alignSelf: 'stretch',
     alignItems: 'center',
   },
   stopText: { color: '#fff', fontSize: 16, fontWeight: '600' },

@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>PetTV</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font-family: system-ui, -apple-system, sans-serif; background: #F0FFF4; color: #1a1a1a;
+  }
+  .card { display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 24px 16px; text-align: center; max-width: 420px; }
+  h1 { margin: 0; font-size: 32px; }
+  .emoji { font-size: 48px; }
+  button {
+    font: inherit; font-size: 18px; font-weight: 700; border: 0; border-radius: 14px;
+    padding: 16px 36px; color: #fff; background: #27ae60; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  button.link { background: none; color: #888; font-size: 13px; font-weight: 400; padding: 8px; }
+  .muted { color: #888; font-size: 15px; }
+  .err { color: #c0392b; font-size: 15px; font-weight: 600; }
+  [hidden] { display: none !important; }
+
+  #player { position: fixed; inset: 0; background: #000; }
+  #player video { width: 100%; height: 100%; object-fit: contain; }
+  #pst { position: absolute; top: 40%; left: 0; right: 0; text-align: center; color: #fff; font-size: 16px; padding: 12px; }
+  #player button { position: absolute; font-size: 15px; font-weight: 600; padding: 8px 16px; border-radius: 20px; background: rgba(0,0,0,.6); }
+  #disc { top: calc(16px + env(safe-area-inset-top)); right: 16px; }
+  #unmute { bottom: calc(24px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); }
+</style>
+</head>
+<body>
+<div class="card" id="home">
+  <div class="emoji">📱</div>
+  <h1>PetTV</h1>
+  <p class="muted" id="msg">Loading…</p>
+  <button id="signin" hidden>Sign in with Google</button>
+  <button id="watch" hidden>▶&nbsp; Watch Live</button>
+  <button class="link" id="signout" hidden>Sign out</button>
+</div>
+
+<div id="player" hidden>
+  <video id="v" autoplay playsinline muted></video>
+  <div id="pst">Connecting…</div>
+  <button id="disc">✕ Disconnect</button>
+  <button id="unmute">🔊 Tap for sound</button>
+</div>
+
+<script type="module">
+const SDK = 'https://www.gstatic.com/firebasejs/13.4.0';
+const { initializeApp } = await import(`${SDK}/firebase-app.js`);
+const { getAuth, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut } = await import(`${SDK}/firebase-auth.js`);
+const { getDatabase, ref, onValue, onChildAdded, set, push, remove, onDisconnect } = await import(`${SDK}/firebase-database.js`);
+
+const $ = (id) => document.getElementById(id);
+const ICE = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }];
+
+function show(text, isError = false) {
+  $('msg').textContent = text;
+  $('msg').className = isError ? 'err' : 'muted';
+}
+
+let firebaseConfig;
+try {
+  ({ firebaseConfig } = await import('./firebase-config.js'));
+} catch {
+  show('Missing firebase-config.js — copy firebase-config.example.js and fill it in.', true);
+  throw new Error('missing config');
+}
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getDatabase(app);
+
+let homeOnline = false;
+let allowed = false;
+let session = null; // { pc, subs, ref }
+
+function refreshButtons() {
+  const user = auth.currentUser;
+  $('signin').hidden = !!user;
+  $('signout').hidden = !user;
+  $('watch').hidden = !(user && allowed && homeOnline);
+}
+
+let hbUnsub = null;
+onAuthStateChanged(auth, (user) => {
+  hbUnsub?.();
+  hbUnsub = null;
+  allowed = false;
+  homeOnline = false;
+  if (!user) {
+    show('Sign in with a Google account that is on the PetTV whitelist.');
+    refreshButtons();
+    return;
+  }
+  show(`Signed in as ${user.email}. Checking access…`);
+  hbUnsub = onValue(ref(db, '/heartbeat'), (snap) => {
+    allowed = true;
+    homeOnline = snap.exists();
+    show(homeOnline ? `Signed in as ${user.email}` : 'Home phone is offline');
+    refreshButtons();
+  }, (err) => {
+    show(err.code === 'PERMISSION_DENIED'
+      ? `${user.email} is not on the PetTV whitelist.`
+      : `Database error: ${err.message}`, true);
+    refreshButtons();
+  });
+  refreshButtons();
+});
+
+$('signin').onclick = async () => {
+  $('signin').disabled = true;
+  try {
+    await signInWithPopup(auth, new GoogleAuthProvider());
+  } catch (e) {
+    show(`Sign-in failed: ${e.code ?? e.message}`, true);
+  }
+  $('signin').disabled = false;
+};
+
+$('signout').onclick = async () => {
+  await stopWatching();
+  await signOut(auth);
+};
+
+function pst(text) {
+  $('pst').hidden = false;
+  $('pst').textContent = text;
+}
+
+async function startWatching() {
+  const uid = auth.currentUser.uid;
+  const sessionRef = ref(db, `/sessions/${uid}`);
+  const pc = new RTCPeerConnection({ iceServers: ICE });
+  session = { pc, subs: [], ref: sessionRef };
+  const s = session;
+
+  $('home').hidden = true;
+  $('player').hidden = false;
+  $('v').muted = true;
+  $('unmute').hidden = false;
+  pst('Requesting stream…');
+
+  pc.ontrack = (e) => {
+    if (e.streams?.[0]) {
+      $('v').srcObject = e.streams[0];
+      $('v').play().catch(() => {});
+    }
+  };
+  pc.onconnectionstatechange = () => {
+    const state = pc.connectionState;
+    if (state === 'connected') $('pst').hidden = true;
+    else if (state === 'disconnected') pst('Reconnecting…');
+    else if (state === 'failed') lost('Connection lost');
+  };
+  pc.onicecandidate = ({ candidate }) => {
+    if (candidate && session === s) push(ref(db, `/sessions/${uid}/ice_viewer`), candidate.toJSON());
+  };
+
+  try {
+    await remove(sessionRef);
+    // Closing the tab or losing the network drops the session so the home phone frees the connection
+    await onDisconnect(sessionRef).remove();
+    const user = auth.currentUser;
+    await set(sessionRef, {
+      request: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: user.displayName || user.email || 'Web viewer',
+    });
+  } catch (e) {
+    lost(`Could not request stream: ${e.message}`);
+    return;
+  }
+  pst('Waiting for home phone…');
+
+  let answered = false;
+  s.subs.push(onValue(ref(db, `/sessions/${uid}/offer`), async (snap) => {
+    const sdp = snap.val();
+    if (typeof sdp !== 'string' || answered || session !== s) return;
+    answered = true;
+    try {
+      pst('Creating connection…');
+      await pc.setRemoteDescription({ type: 'offer', sdp });
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await set(ref(db, `/sessions/${uid}/answer`), answer.sdp);
+      pst('Waiting for stream…');
+      s.subs.push(onChildAdded(ref(db, `/sessions/${uid}/ice_home`), (c) => {
+        const cand = c.val();
+        if (cand?.candidate) pc.addIceCandidate(cand).catch(() => {});
+      }));
+    } catch (e) {
+      lost(`Error: ${e.message}`);
+    }
+  }));
+}
+
+async function stopWatching() {
+  const s = session;
+  if (!s) return;
+  session = null;
+  s.subs.forEach((unsub) => unsub());
+  s.pc.close();
+  $('v').srcObject = null;
+  $('player').hidden = true;
+  $('home').hidden = false;
+  await onDisconnect(s.ref).cancel().catch(() => {});
+  await remove(s.ref).catch(() => {});
+}
+
+async function lost(reason) {
+  await stopWatching();
+  show(reason, true);
+  refreshButtons();
+}
+
+$('watch').onclick = () => startWatching();
+$('disc').onclick = async () => {
+  await stopWatching();
+  refreshButtons();
+};
+$('unmute').onclick = () => {
+  $('v').muted = false;
+  $('v').play().catch(() => {});
+  $('unmute').hidden = true;
+};
+</script>
+</body>
+</html>
