@@ -4,4 +4,4 @@ web/firebase-config.js
 .firebase/
 *.jpg
 !app/assets/images/tako.jpg
-!web/tako.jpg
+!web/*/tako.jpg

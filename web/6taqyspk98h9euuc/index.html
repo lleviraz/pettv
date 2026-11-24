@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<!-- Keeps the secret path out of the Referer header sent to other sites -->
+<meta name="referrer" content="no-referrer">
 <title>PetTV</title>
 <style>
   * { box-sizing: border-box; }
@@ -78,7 +81,7 @@ function show(text, isError = false) {
 
 let firebaseConfig;
 try {
-  ({ firebaseConfig } = await import('./firebase-config.js'));
+  ({ firebaseConfig } = await import('../firebase-config.js'));
 } catch {
   show('Missing firebase-config.js — copy firebase-config.example.js and fill it in.', true);
   throw new Error('missing config');

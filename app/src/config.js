@@ -14,5 +14,6 @@ export const auth = firstInit
   : getAuth(app);
 export const db = getDatabase(app);
 export const DB_URL = firebaseConfig.databaseURL;
-export const WEB_URL = `https://${firebaseConfig.projectId}.web.app`;
+// The bare domain serves a 404; the viewer page lives under an unguessable folder in web/
+export const WEB_URL = `https://${firebaseConfig.projectId}.web.app/6taqyspk98h9euuc/`;
 export { WEB_CLIENT_ID };
