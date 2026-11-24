@@ -1,7 +1,24 @@
-import { ref, get, update, push, serverTimestamp } from 'firebase/database';
+import { ref, get, set, remove, update, push, serverTimestamp } from 'firebase/database';
 import * as Crypto from 'expo-crypto';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { auth, db } from './config';
+
+const CODE_ATTEMPT_LIMIT = 5;
+const REQ_ATTEMPT_LIMIT = 5;
+
+async function getAttemptCount(uid, type) {
+  const snap = await get(ref(db, `/attempts/${uid}/${type}`)).catch(() => null);
+  return snap?.val() ?? 0;
+}
+
+async function incrementAttempt(uid, type, current) {
+  await set(ref(db, `/attempts/${uid}/${type}`), current + 1).catch(() => {});
+  return current + 1;
+}
+
+export async function resetAttempts(uid) {
+  return remove(ref(db, `/attempts/${uid}`));
+}
 
 // No 0/O, 1/I/L so codes survive being read aloud or retyped
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -55,10 +72,29 @@ export async function hasViewerAccess(uid) {
 export async function redeemTicket(rawCode) {
   const code = normalizeCode(rawCode);
   const user = auth.currentUser;
+
+  const codeCount = await getAttemptCount(user.uid, 'codeCount');
+  if (codeCount >= CODE_ATTEMPT_LIMIT) {
+    throw new Error('Too many failed attempts. Ask the owner to reset your access.');
+  }
+
   const snap = await get(ref(db, `/tickets/${code}`)).catch(() => null);
   const ticket = snap?.val();
-  if (!ticket || ticket.expires < Date.now()) throw new Error('Invalid or expired code');
-  if (ticket.uid !== user.uid) throw new Error('This code was issued for a different account');
+
+  if (!ticket || ticket.expires < Date.now()) {
+    const next = await incrementAttempt(user.uid, 'codeCount', codeCount);
+    if (next >= CODE_ATTEMPT_LIMIT) logEvent('code-locked', { detail: `locked after ${CODE_ATTEMPT_LIMIT} failed code attempts` });
+    const remaining = CODE_ATTEMPT_LIMIT - next;
+    throw new Error(remaining <= 0
+      ? 'Too many failed attempts. Ask the owner to reset your access.'
+      : `Invalid or expired code (${remaining} attempt${remaining === 1 ? '' : 's'} left)`);
+  }
+  if (ticket.uid !== user.uid) {
+    const next = await incrementAttempt(user.uid, 'codeCount', codeCount);
+    if (next >= CODE_ATTEMPT_LIMIT) logEvent('code-locked', { detail: `locked after ${CODE_ATTEMPT_LIMIT} failed code attempts` });
+    throw new Error('This code was issued for a different account');
+  }
+
   const logKey = push(ref(db, '/log')).key;
   await update(ref(db), {
     [`log/${logKey}`]: logEntry('redeemed', { detail: `code ${formatCode(code)}, ${formatDuration(ticket.accessMs)}` }),
@@ -77,6 +113,12 @@ export async function redeemTicket(rawCode) {
 // The rules require email to match the verified Google email, so the admin always sees the real address
 export async function requestAccess(type = 'viewer') {
   const user = auth.currentUser;
+
+  const reqCount = await getAttemptCount(user.uid, 'reqCount');
+  if (reqCount >= REQ_ATTEMPT_LIMIT) {
+    throw new Error('Too many access requests. Ask the owner to reset your account.');
+  }
+
   await update(ref(db), {
     [`requests/${user.uid}`]: {
       name: (user.displayName || user.email || 'Viewer').slice(0, 99),
@@ -86,6 +128,9 @@ export async function requestAccess(type = 'viewer') {
     },
     [`log/${push(ref(db, '/log')).key}`]: logEntry(type === 'home' ? 'requested-home' : 'requested', { detail: 'Android app' }),
   });
+
+  const next = await incrementAttempt(user.uid, 'reqCount', reqCount);
+  if (next >= REQ_ATTEMPT_LIMIT) logEvent('req-locked', { detail: `locked after ${REQ_ATTEMPT_LIMIT} access requests` });
 }
 
 export async function isHomeAccount() {

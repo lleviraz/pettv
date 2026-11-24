@@ -88,6 +88,17 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getDatabase(app);
 
+const CODE_ATTEMPT_LIMIT = 5;
+const REQ_ATTEMPT_LIMIT = 5;
+async function getAttemptCount(uid, type) {
+  const snap = await get(ref(db, `/attempts/${uid}/${type}`)).catch(() => null);
+  return snap?.val() ?? 0;
+}
+async function incrementAttempt(uid, type, current) {
+  await set(ref(db, `/attempts/${uid}/${type}`), current + 1).catch(() => {});
+  return current + 1;
+}
+
 let homeOnline = false;
 let allowed = false;
 let session = null; // { pc, subs, ref }
@@ -132,6 +143,11 @@ $('request').onclick = async () => {
   const user = auth.currentUser;
   $('request').disabled = true;
   try {
+    const reqCount = await getAttemptCount(user.uid, 'reqCount');
+    if (reqCount >= REQ_ATTEMPT_LIMIT) {
+      show('Too many access requests. Contact the owner to reset your account.', true);
+      return;
+    }
     await update(ref(db), {
       [`requests/${user.uid}`]: {
         name: (user.displayName || user.email || 'Web viewer').slice(0, 99),
@@ -141,6 +157,8 @@ $('request').onclick = async () => {
       },
       [`log/${push(ref(db, '/log')).key}`]: logEntry('requested', { detail: 'web' }),
     });
+    const next = await incrementAttempt(user.uid, 'reqCount', reqCount);
+    if (next >= REQ_ATTEMPT_LIMIT) logEvent('req-locked', { detail: 'web — locked after ' + REQ_ATTEMPT_LIMIT + ' requests' });
   } catch (e) {
     show(`Could not send the request: ${e.message}`, true);
   }
@@ -234,9 +252,30 @@ $('codeForm').onsubmit = async (e) => {
   const button = $('codeForm').querySelector('button');
   button.disabled = true;
   try {
+    const codeCount = await getAttemptCount(user.uid, 'codeCount');
+    if (codeCount >= CODE_ATTEMPT_LIMIT) {
+      show('Too many failed attempts. Contact the owner to reset your access.', true);
+      button.disabled = false;
+      return;
+    }
     const ticket = (await get(ref(db, `/tickets/${code}`)).catch(() => null))?.val();
-    if (!ticket || ticket.expires < Date.now()) throw new Error('Invalid or expired code');
-    if (ticket.uid !== user.uid) throw new Error('This code was issued for a different account');
+    if (!ticket || ticket.expires < Date.now()) {
+      const next = await incrementAttempt(user.uid, 'codeCount', codeCount);
+      if (next >= CODE_ATTEMPT_LIMIT) logEvent('code-locked', { detail: 'web — locked after ' + CODE_ATTEMPT_LIMIT + ' failed attempts' });
+      const remaining = CODE_ATTEMPT_LIMIT - next;
+      show(remaining <= 0
+        ? 'Too many failed attempts. Contact the owner to reset your access.'
+        : `Invalid or expired code (${remaining} attempt${remaining === 1 ? '' : 's'} left)`, true);
+      button.disabled = false;
+      return;
+    }
+    if (ticket.uid !== user.uid) {
+      const next = await incrementAttempt(user.uid, 'codeCount', codeCount);
+      if (next >= CODE_ATTEMPT_LIMIT) logEvent('code-locked', { detail: 'web — locked after ' + CODE_ATTEMPT_LIMIT + ' failed attempts' });
+      show('This code was issued for a different account', true);
+      button.disabled = false;
+      return;
+    }
     const days = ticket.accessMs / 86400000;
     const duration = days >= 1 ? `${Math.round(days)}d` : `${Math.round(ticket.accessMs / 3600000)}h`;
     await update(ref(db), {
@@ -256,8 +295,7 @@ $('codeForm').onsubmit = async (e) => {
     $('code').value = '';
     await watchAccess(user);
   } catch (err) {
-    const known = ['Invalid or expired code', 'This code was issued for a different account'];
-    show(known.includes(err.message) ? err.message : 'Code not accepted. Ask the owner for a new one.', true);
+    show('Code not accepted. Ask the owner for a new one.', true);
   }
   button.disabled = false;
 };

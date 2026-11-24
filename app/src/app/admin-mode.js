@@ -4,7 +4,7 @@ import { router } from 'expo-router';
 import { ref, onValue, set, remove, query, limitToLast, serverTimestamp } from 'firebase/database';
 import { db, WEB_URL } from '../config';
 import {
-  generateTicketCode, formatCode, formatDuration, isAdmin, confirmWithDevice, logEvent, TICKET_REDEEM_WINDOW_MS,
+  generateTicketCode, formatCode, formatDuration, isAdmin, confirmWithDevice, logEvent, resetAttempts, TICKET_REDEEM_WINDOW_MS,
 } from '../access';
 
 const EVENT_LABELS = {
@@ -25,6 +25,9 @@ const EVENT_LABELS = {
   'revoked': '↩️ Access revoked',
   'blocked': '🚫 Blocked',
   'unblocked': '🔓 Unblocked',
+  'code-locked': '🔒 Code attempts locked',
+  'req-locked': '🔒 Request attempts locked',
+  'attempts-reset': '🔓 Attempts reset',
 };
 
 const HOUR = 60 * 60 * 1000;
@@ -60,6 +63,7 @@ export default function AdminScreen() {
   const [blocked, setBlocked] = useState({});
   const [log, setLog] = useState({});
   const [requests, setRequests] = useState({});
+  const [attempts, setAttempts] = useState({});
   const [codeFor, setCodeFor] = useState(null); // uid whose duration picker is open
   const [now, setNow] = useState(Date.now());
 
@@ -80,6 +84,7 @@ export default function AdminScreen() {
       onValue(ref(db, '/sessions'), s => setSessions(s.val() || {}), onErr),
       onValue(ref(db, '/blocked'), s => setBlocked(s.val() || {}), onErr),
       onValue(ref(db, '/requests'), s => setRequests(s.val() || {}), onErr),
+      onValue(ref(db, '/attempts'), s => setAttempts(s.val() || {}), onErr),
       onValue(query(ref(db, '/log'), limitToLast(50)), s => setLog(s.val() || {}), onErr),
     ];
     const timer = setInterval(() => setNow(Date.now()), 30000);
@@ -184,6 +189,13 @@ export default function AdminScreen() {
     guarded('Cancel access code', () => remove(ref(db, `/tickets/${code}`)));
   }
 
+  function resetLock(p) {
+    guarded('Reset attempt counter', async () => {
+      await resetAttempts(p.uid);
+      logEvent('attempts-reset', { subject: p.uid, detail: personLabel(p).slice(0, 199) });
+    });
+  }
+
   if (state === 'checking') {
     return <View style={styles.center}><ActivityIndicator color="#4A90E2" /></View>;
   }
@@ -213,6 +225,13 @@ export default function AdminScreen() {
       </View>
     );
   }
+
+  const lockedOut = Object.entries(attempts)
+    .filter(([, a]) => (a.codeCount ?? 0) >= 5 || (a.reqCount ?? 0) >= 5)
+    .map(([uid, a]) => ({ uid, codeCount: a.codeCount ?? 0, reqCount: a.reqCount ?? 0,
+      ...grants[uid] && { name: grants[uid].name, email: grants[uid].email },
+      ...requests[uid] && { name: requests[uid].name, email: requests[uid].email },
+    }));
 
   const activeGrants = Object.entries(grants)
     .map(([uid, g]) => ({ uid, ...g, until: g.redeemedAt + g.accessMs }))
@@ -342,6 +361,25 @@ export default function AdminScreen() {
           </View>
           <TouchableOpacity style={styles.neutralBtn} onPress={() => unblock(b)}>
             <Text style={styles.neutralText}>Unblock</Text>
+          </TouchableOpacity>
+        </View>
+      ))}
+
+      <Text style={styles.section}>Locked out ({lockedOut.length})</Text>
+      {lockedOut.length === 0 && <Text style={styles.hint}>No one is locked out.</Text>}
+      {lockedOut.map(p => (
+        <View key={p.uid} style={styles.row}>
+          <View style={styles.rowText}>
+            <Text style={styles.rowTitle} numberOfLines={1}>{p.name ?? p.uid}</Text>
+            <Text style={styles.rowSub} numberOfLines={1}>
+              {p.email ? `${p.email} · ` : ''}
+              {p.codeCount >= 5 ? `${p.codeCount} wrong codes` : ''}
+              {p.codeCount >= 5 && p.reqCount >= 5 ? ' · ' : ''}
+              {p.reqCount >= 5 ? `${p.reqCount} requests` : ''}
+            </Text>
+          </View>
+          <TouchableOpacity style={styles.neutralBtn} onPress={() => resetLock(p)}>
+            <Text style={styles.neutralText}>Reset</Text>
           </TouchableOpacity>
         </View>
       ))}

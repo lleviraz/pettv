@@ -305,3 +305,73 @@ describe('admin', () => {
     await assertFails(as(ADMIN).ref(`whitelist/${STRANGER}`).set(true));
   });
 });
+
+describe('attempt limits', () => {
+  test('owner can increment codeCount by 1 from zero', async () => {
+    await assertSucceeds(as(GUEST).ref(`attempts/${GUEST}/codeCount`).set(1));
+  });
+
+  test('owner can increment codeCount step by step', async () => {
+    await env.withSecurityRulesDisabled((ctx) => ctx.database().ref(`attempts/${GUEST}/codeCount`).set(3));
+    await assertSucceeds(as(GUEST).ref(`attempts/${GUEST}/codeCount`).set(4));
+  });
+
+  test('owner cannot skip counts or decrement', async () => {
+    await assertFails(as(GUEST).ref(`attempts/${GUEST}/codeCount`).set(2)); // must start at 1
+    await env.withSecurityRulesDisabled((ctx) => ctx.database().ref(`attempts/${GUEST}/codeCount`).set(3));
+    await assertFails(as(GUEST).ref(`attempts/${GUEST}/codeCount`).set(5)); // skip
+    await assertFails(as(GUEST).ref(`attempts/${GUEST}/codeCount`).set(2)); // decrement
+    await assertFails(as(GUEST).ref(`attempts/${GUEST}/codeCount`).set(0)); // reset to 0
+  });
+
+  test('owner cannot write arbitrary fields', async () => {
+    await assertFails(as(GUEST).ref(`attempts/${GUEST}/other`).set(1));
+  });
+
+  test('stranger cannot touch another user\'s attempts', async () => {
+    await assertFails(as(STRANGER).ref(`attempts/${GUEST}/codeCount`).set(1));
+    await assertFails(as(STRANGER).ref(`attempts/${GUEST}`).remove());
+  });
+
+  test('code redemption is blocked when codeCount >= 5', async () => {
+    await env.withSecurityRulesDisabled((ctx) => ctx.database().ref(`attempts/${GUEST}/codeCount`).set(5));
+    await assertFails(redeem(as(GUEST), GUEST, 'GUESTCODE'));
+  });
+
+  test('code redemption succeeds when codeCount is 4', async () => {
+    await env.withSecurityRulesDisabled((ctx) => ctx.database().ref(`attempts/${GUEST}/codeCount`).set(4));
+    await assertSucceeds(redeem(as(GUEST), GUEST, 'GUESTCODE'));
+  });
+
+  test('new request is blocked when reqCount >= 5', async () => {
+    await env.withSecurityRulesDisabled((ctx) => ctx.database().ref(`attempts/${STRANGER}/reqCount`).set(5));
+    await assertFails(request(as(STRANGER), STRANGER));
+  });
+
+  test('new request succeeds when reqCount is 4', async () => {
+    await env.withSecurityRulesDisabled((ctx) => ctx.database().ref(`attempts/${STRANGER}/reqCount`).set(4));
+    await assertSucceeds(request(as(STRANGER), STRANGER));
+  });
+
+  test('withdrawing a pending request is allowed even when reqCount >= 5', async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await ctx.database().ref(`requests/${STRANGER}`).set({ name: 'S', email: emailOf(STRANGER), type: 'viewer', ts: Date.now() });
+      await ctx.database().ref(`attempts/${STRANGER}/reqCount`).set(5);
+    });
+    await assertSucceeds(as(STRANGER).ref(`requests/${STRANGER}`).remove());
+  });
+
+  test('admin can read all attempts and reset any user', async () => {
+    await env.withSecurityRulesDisabled((ctx) => ctx.database().ref(`attempts/${GUEST}/codeCount`).set(5));
+    await assertSucceeds(as(ADMIN).ref('attempts').get());
+    await assertSucceeds(as(ADMIN).ref(`attempts/${GUEST}`).remove());
+    // After reset, redemption works again
+    await assertSucceeds(redeem(as(GUEST), GUEST, 'GUESTCODE'));
+  });
+
+  test('owner can read its own attempts', async () => {
+    await env.withSecurityRulesDisabled((ctx) => ctx.database().ref(`attempts/${GUEST}/codeCount`).set(3));
+    await assertSucceeds(as(GUEST).ref(`attempts/${GUEST}`).get());
+    await assertFails(as(GUEST).ref('attempts').get()); // cannot list all
+  });
+});
