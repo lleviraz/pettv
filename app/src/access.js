@@ -98,11 +98,20 @@ export async function isAdmin() {
   return !!snap && snap.val() === auth.currentUser?.uid;
 }
 
+const CANCELLED = new Set(['user_cancel', 'system_cancel', 'app_cancel']);
+
+// Returns false only when the user cancels; other failures throw so the caller can show why.
+// err.code === 'no-lock' means the phone has no screen lock, so there is nothing to check against.
 export async function confirmWithDevice(promptMessage) {
   const level = await LocalAuthentication.getEnrolledLevelAsync();
   if (level === LocalAuthentication.SecurityLevel.NONE) {
-    throw new Error('Set up a screen lock or fingerprint on this phone first');
+    const err = new Error('Set up a screen lock or fingerprint on this phone first');
+    err.code = 'no-lock';
+    throw err;
   }
   const result = await LocalAuthentication.authenticateAsync({ promptMessage });
-  return result.success;
+  if (result.success) return true;
+  if (CANCELLED.has(result.error)) return false;
+  console.warn('Device check failed:', result.error, result.warning);
+  throw new Error(`Device check failed (${result.error}${result.warning ? `: ${result.warning}` : ''})`);
 }

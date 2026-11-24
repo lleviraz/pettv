@@ -29,7 +29,8 @@
   [hidden] { display: none !important; }
 
   #player { position: fixed; inset: 0; background: #000; }
-  #player video { width: 100%; height: 100%; object-fit: contain; }
+  #player video { position: absolute; top: 50%; left: 50%; object-fit: contain; }
+  #rot { top: calc(16px + env(safe-area-inset-top)); left: 16px; }
   #pst { position: absolute; top: 40%; left: 0; right: 0; text-align: center; color: #fff; font-size: 16px; padding: 12px; }
   #player button { position: absolute; font-size: 15px; font-weight: 600; padding: 8px 16px; border-radius: 20px; background: rgba(0,0,0,.6); }
   #disc { top: calc(16px + env(safe-area-inset-top)); right: 16px; }
@@ -57,6 +58,7 @@
   <div id="pst">Connecting…</div>
   <button id="disc">✕ Disconnect</button>
   <button id="unmute">🔊 Tap for sound</button>
+  <button id="rot">⟳ Rotate</button>
 </div>
 
 <script type="module">
@@ -371,6 +373,25 @@ $('disc').onclick = async () => {
   await stopWatching();
   refreshButtons();
 };
+let rotation = 0;
+try { rotation = Number(localStorage.getItem('pettv-rotation')) || 0; } catch {}
+
+// Sideways turns swap the box so the rotated video still fills the screen
+function applyRotation() {
+  const sideways = rotation % 180 !== 0;
+  $('v').style.width = `${sideways ? innerHeight : innerWidth}px`;
+  $('v').style.height = `${sideways ? innerWidth : innerHeight}px`;
+  $('v').style.transform = `translate(-50%, -50%) rotate(${rotation}deg)`;
+}
+
+$('rot').onclick = () => {
+  rotation = (rotation + 90) % 360;
+  try { localStorage.setItem('pettv-rotation', String(rotation)); } catch {}
+  applyRotation();
+};
+addEventListener('resize', applyRotation);
+applyRotation();
+
 $('unmute').onclick = () => {
   $('v').muted = false;
   $('v').play().catch(() => {});

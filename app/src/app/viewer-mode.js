@@ -16,15 +16,35 @@ function buildViewerHtml(idToken, myUid, myName, myEmail) {
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#000;overflow:hidden;font-family:sans-serif}
-video{width:100vw;height:100vh;object-fit:cover}
+video{position:absolute;top:50%;left:50%;object-fit:contain}
 #st{position:fixed;top:40%;left:0;right:0;text-align:center;color:#fff;font-size:16px;padding:12px}
+#rot{position:fixed;left:20px;top:48px;font-size:15px;font-weight:600;color:#fff;background:rgba(0,0,0,.6);border:0;border-radius:20px;padding:8px 16px}
 </style>
 </head>
 <body>
 <video id="v" autoplay playsinline></video>
 <div id="st">Connecting...</div>
+<button id="rot">⟳ Rotate</button>
 <script>
 ${signalingScript(idToken, myUid)}
+let rotation=0;
+try{rotation=Number(localStorage.getItem('pettv-rotation'))||0;}catch(_){}
+
+// Sideways turns swap the box so the rotated video still fills the screen
+function applyRotation(){
+  const v=document.getElementById('v');
+  const sideways=rotation%180!==0;
+  v.style.width=(sideways?innerHeight:innerWidth)+'px';
+  v.style.height=(sideways?innerWidth:innerHeight)+'px';
+  v.style.transform='translate(-50%,-50%) rotate('+rotation+'deg)';
+}
+document.getElementById('rot').onclick=()=>{
+  rotation=(rotation+90)%360;
+  try{localStorage.setItem('pettv-rotation',String(rotation));}catch(_){}
+  applyRotation();
+};
+addEventListener('resize',applyRotation);
+applyRotation();
 const REQ=Date.now()+'-'+Math.random().toString(36).slice(2,8);
 const NAME=${JSON.stringify(myName).replace(/</g, '\\u003c')};
 const EMAIL=${JSON.stringify(myEmail).replace(/</g, '\\u003c')};
@@ -90,6 +110,7 @@ export default function ViewerModeScreen() {
   const [homeOnline, setHomeOnline] = useState(null);
   const [statusMsg, setStatusMsg] = useState('');
   const [locked, setLockedState] = useState(true);
+  const [unlockError, setUnlockError] = useState(null);
   const lockedRef = useRef(true);
   const promptingRef = useRef(false);
   const myUid = auth.currentUser?.uid;
@@ -101,11 +122,13 @@ export default function ViewerModeScreen() {
 
   async function unlock() {
     promptingRef.current = true;
-    let ok;
+    setUnlockError(null);
+    let ok = false;
     try {
       ok = await confirmWithDevice('Unlock PetTV');
-    } catch {
-      ok = true; // no screen lock on this phone, so there is nothing to check against
+    } catch (e) {
+      if (e.code === 'no-lock') ok = true; // nothing to check against on a phone without a screen lock
+      else setUnlockError(e.message);
     }
     promptingRef.current = false;
     if (ok) setLocked(false);
@@ -177,6 +200,7 @@ export default function ViewerModeScreen() {
       <View style={styles.container}>
         <Text style={styles.emoji}>🔒</Text>
         <Text style={styles.title}>PetTV</Text>
+        {!!unlockError && <Text style={styles.errorDetail}>{unlockError}</Text>}
         <TouchableOpacity style={styles.connectBtn} onPress={unlock}>
           <Text style={styles.connectText}>Unlock</Text>
         </TouchableOpacity>
@@ -196,6 +220,7 @@ export default function ViewerModeScreen() {
           source={{ html: buildViewerHtml(token, myUid, auth.currentUser?.displayName || auth.currentUser?.email || 'Android viewer', auth.currentUser?.email ?? ''), baseUrl: 'https://localhost' }}
           style={styles.video}
           javaScriptEnabled={true}
+          domStorageEnabled={true}
           mediaPlaybackRequiresUserAction={false}
           allowsInlineMediaPlayback={true}
           originWhitelist={['*']}

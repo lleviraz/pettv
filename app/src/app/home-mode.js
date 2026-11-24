@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, StatusBar, Pressable, BackHandler, Alert } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, StatusBar, Pressable, BackHandler, Alert, AppState } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { useKeepAwake } from 'expo-keep-awake';
 import * as Brightness from 'expo-brightness';
-import { confirmWithDevice } from '../access';
+import { confirmWithDevice, logEvent } from '../access';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
 import { ref, remove, set, onValue, onDisconnect, serverTimestamp } from 'firebase/database';
@@ -28,15 +28,51 @@ ${signalingScript(idToken, uid)}
 const viewers={};
 const grants={};
 const blocked={};
-let stream;
+const CAMERA_IDLE_MS=30000;
+let stream=null;
+let streamPromise=null;
+let releaseTimer=null;
 
 function grantValid(vid){
   const g=grants[vid];
   return !!g&&g.redeemedAt+g.accessMs>Date.now();
 }
 
-function logEv(event,vid,name){
-  dbw('/log.json','POST',{uid:UID,event,subject:vid,detail:name,ts:{'.sv':'timestamp'}}).catch(()=>{});
+function logEv(event,subject,detail){
+  dbw('/log.json','POST',{uid:UID,event,subject,detail,ts:{'.sv':'timestamp'}}).catch(()=>{});
+}
+
+// Camera and mic run only while someone watches, so the green privacy dot means "being watched"
+function ensureStream(who){
+  clearTimeout(releaseTimer);
+  if(stream)return Promise.resolve(stream);
+  if(!streamPromise){
+    streamPromise=navigator.mediaDevices.getUserMedia({
+      audio:true,
+      video:{facingMode:'user',width:{ideal:640},height:{ideal:480},frameRate:{ideal:15}}
+    }).then(s=>{
+      stream=s;
+      document.getElementById('v').srcObject=s;
+      post({t:'camera',on:true});
+      logEv('camera-on',undefined,who);
+      return s;
+    }).finally(()=>{streamPromise=null;});
+  }
+  return streamPromise;
+}
+
+// Kept alive briefly after the last viewer so a quick reconnect doesn't wait for the camera again
+function releaseIfIdle(){
+  clearTimeout(releaseTimer);
+  if(Object.keys(viewers).length>0||!stream)return;
+  releaseTimer=setTimeout(()=>{
+    if(Object.keys(viewers).length>0||!stream)return;
+    stream.getTracks().forEach(t=>t.stop());
+    stream=null;
+    document.getElementById('v').srcObject=null;
+    post({t:'camera',on:false});
+    logEv('camera-off',undefined,'no viewers for 30s');
+  },CAMERA_IDLE_MS);
 }
 
 // Rules only block new requests; a stream already flowing must be cut here when access ends
@@ -72,21 +108,14 @@ function closeViewer(vid){
   v.listeners.forEach(l=>l.close());
   v.pc.close();
   updateCount();
+  releaseIfIdle();
 }
 
 async function start(){
-  st('Starting camera...');
-  try{
-    stream=await navigator.mediaDevices.getUserMedia({
-      audio:true,
-      video:{facingMode:'user',width:{ideal:640},height:{ideal:480},frameRate:{ideal:15}}
-    });
-  }catch(e){st('Camera error: '+e.message);return;}
-  document.getElementById('v').srcObject=stream;
-
   try{await dbw('/sessions.json','DELETE');}catch(e){st(e.message);return;}
   st('Online');
   post({t:'ready'});
+  logEv('home-online',undefined,'Home phone started');
 
   sse('/grants.json',(type,path,data)=>mirror(grants,type,path,data));
   sse('/blocked.json',(type,path,data)=>mirror(blocked,type,path,data));
@@ -111,7 +140,17 @@ async function handleViewer(vid,reqId,name,email){
   const v={pc,reqId,name:String(name||'Unknown viewer').slice(0,60),label,viaGrant:grantValid(vid),listeners:[]};
   viewers[vid]=v;
   const live=()=>viewers[vid]===v;
-  stream.getTracks().forEach(t=>pc.addTrack(t,stream));
+  let s;
+  try{
+    s=await ensureStream(label);
+  }catch(e){
+    st('Camera error: '+e.message);
+    closeViewer(vid);
+    return;
+  }
+  // The viewer may have left while the camera was starting; closeViewer saw no stream yet to release
+  if(!live()){releaseIfIdle();return;}
+  s.getTracks().forEach(t=>pc.addTrack(t,s));
 
   pc.onicecandidate=({candidate})=>{
     if(candidate&&live())dbw('/sessions/'+vid+'/ice_home.json','POST',candidate.toJSON()).catch(()=>{});
@@ -163,14 +202,16 @@ export default function HomeModeScreen() {
   const { token, error, pushFreshToken } = useSignalingToken(webRef);
   const [status, setStatus] = useState('Loading...');
   const [viewers, setViewers] = useState([]);
-  const [cameraReady, setCameraReady] = useState(false);
+  const [online, setOnline] = useState(false);
+  const [cameraOn, setCameraOn] = useState(false);
   const [dark, setDark] = useState(false);
   const [peek, setPeek] = useState(false);
+  const promptingRef = useRef(false);
   const uid = auth.currentUser?.uid;
 
   // Presence: Firebase drops /heartbeat if this phone loses its connection; re-set it on every reconnect
   useEffect(() => {
-    if (!cameraReady) return;
+    if (!online) return;
     const hbRef = ref(db, '/heartbeat');
     const unsub = onValue(ref(db, '.info/connected'), async (snap) => {
       if (snap.val() !== true) return;
@@ -187,7 +228,7 @@ export default function HomeModeScreen() {
       remove(hbRef).catch(() => {});
       remove(ref(db, '/sessions')).catch(() => {});
     };
-  }, [cameraReady]);
+  }, [online]);
 
   // Dark mode keeps the camera streaming under a black overlay; on AMOLED black pixels are off
   useEffect(() => {
@@ -203,6 +244,23 @@ export default function HomeModeScreen() {
     return () => clearTimeout(t);
   }, [peek]);
 
+  // Android blocks the camera once the screen is off, so stop advertising "online" until it's back
+  useEffect(() => {
+    if (!online) return;
+    const hbRef = ref(db, '/heartbeat');
+    const sub = AppState.addEventListener('change', (state) => {
+      if (promptingRef.current) return; // the stop() device prompt can briefly background the app
+      if (state === 'background') {
+        remove(hbRef).catch(() => {});
+        logEvent('home-paused', { detail: 'Screen off or app left; camera unavailable' });
+      } else if (state === 'active') {
+        set(hbRef, { ts: serverTimestamp(), uid }).catch(() => {});
+        logEvent('home-resumed', { detail: 'Back in the foreground' });
+      }
+    });
+    return () => sub.remove();
+  }, [online]);
+
   // Back would close the app and stop the camera without the device check in stop()
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => true);
@@ -210,13 +268,21 @@ export default function HomeModeScreen() {
   }, []);
 
   async function stop() {
+    promptingRef.current = true;
     try {
       if (!(await confirmWithDevice('Stop streaming'))) return;
     } catch (e) {
+      if (e.code !== 'no-lock') {
+        Alert.alert('Could not verify', e.message);
+        return;
+      }
       Alert.alert('No screen lock', `${e.message}, so anyone can stop the camera.`);
+    } finally {
+      promptingRef.current = false;
     }
     setDark(false);
-    setCameraReady(false);
+    setOnline(false);
+    logEvent('home-stopped', { detail: 'Stopped from the home phone' });
     await AsyncStorage.removeItem('role');
     router.replace('/role-picker');
   }
@@ -226,7 +292,8 @@ export default function HomeModeScreen() {
       const msg = JSON.parse(e.nativeEvent.data);
       if (msg.t === 's') setStatus(msg.m);
       else if (msg.t === 'viewers') setViewers(msg.names);
-      else if (msg.t === 'ready') setCameraReady(true);
+      else if (msg.t === 'ready') setOnline(true);
+      else if (msg.t === 'camera') setCameraOn(msg.on);
       else if (msg.t === 'needToken') pushFreshToken();
     } catch {}
   }
@@ -245,7 +312,7 @@ export default function HomeModeScreen() {
     <View style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#111" hidden={dark && !peek} />
       <View style={styles.statusRow}>
-        <View style={[styles.onlineDot, !cameraReady && styles.offlineDot]} />
+        <View style={[styles.onlineDot, !online && styles.offlineDot]} />
         <Text style={styles.statusText}>{status}</Text>
       </View>
 
@@ -261,6 +328,12 @@ export default function HomeModeScreen() {
           onPermissionRequest={(request) => { if (request.grant) request.grant(request.resources); }}
           onMessage={onMessage}
         />
+        {!cameraOn && (
+          <View style={styles.cameraOff} pointerEvents="none">
+            <Text style={styles.cameraOffIcon}>📷</Text>
+            <Text style={styles.cameraOffText}>Camera off{'\n'}turns on when someone watches</Text>
+          </View>
+        )}
       </View>
 
       <View style={styles.viewersBox}>
@@ -327,6 +400,20 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
   },
   webview: { flex: 1, backgroundColor: '#000' },
+  cameraOff: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#000',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 8,
+    padding: 12,
+  },
+  cameraOffIcon: { fontSize: 28, opacity: 0.6 },
+  cameraOffText: { color: '#888', fontSize: 13, textAlign: 'center' },
 
   viewersBox: {
     flex: 1,
