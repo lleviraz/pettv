@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, StatusBar, Pressable, BackHandler, Alert, AppState } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, StatusBar, Pressable, BackHandler, Alert, AppState, Platform } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { useKeepAwake } from 'expo-keep-awake';
 import * as Brightness from 'expo-brightness';
@@ -9,6 +9,9 @@ import { router } from 'expo-router';
 import { ref, remove, set, onValue, onDisconnect, serverTimestamp } from 'firebase/database';
 import { auth, db } from '../config';
 import { signalingScript, useSignalingToken } from '../webview-signaling';
+import { dlog, getLines, logVersion } from '../debug-log';
+
+const LOG_UPLOAD_MS = 15000;
 
 function buildHomeHtml(idToken, uid) {
   return `<!DOCTYPE html>
@@ -41,6 +44,8 @@ function grantValid(vid){
 function logEv(event,subject,detail){
   dbw('/log.json','POST',{uid:UID,event,subject,detail,ts:{'.sv':'timestamp'}}).catch(()=>{});
 }
+
+function dl(m){post({t:'log',m:String(m).slice(0,250)});}
 
 // Camera and mic run only while someone watches, so the green privacy dot means "being watched"
 function ensureStream(who){
@@ -105,7 +110,7 @@ function closeViewer(vid){
   if(!v)return;
   delete viewers[vid];
   if(v.started)logEv('watch-stop',vid,v.label);
-  v.listeners.forEach(l=>l.close());
+  dl('closed '+v.name);
   v.pc.close();
   updateCount();
   releaseIfIdle();
@@ -121,16 +126,46 @@ async function start(){
   sse('/blocked.json',(type,path,data)=>mirror(blocked,type,path,data));
   setInterval(enforceAccess,15000);
 
+  // One stream carries every viewer's request, answer and ICE candidates. The WebView allows only
+  // 6 connections to the database host, so a listener per viewer made later viewers queue until
+  // an earlier one left.
   sse('/sessions.json',(type,path,data)=>{
-    for(const[vid,s]of kids(type,path,data)){
-      if(!s){closeViewer(vid);continue;}
-      // Each viewer attempt writes a fresh request id and no offer; anything else is our own write echoing back
-      if(s.request&&!s.offer&&viewers[vid]?.reqId!==s.request){
-        closeViewer(vid);
-        handleViewer(vid,s.request,s.name,s.email,s.device).catch(e=>st('Viewer err: '+e.message));
-      }
+    const p=path.split('/').filter(Boolean);
+    if(p.length===0){
+      for(const[vid,s]of(data&&typeof data==='object'?Object.entries(data):[]))onSessionTop(vid,s);
+    }else if(p.length===1&&type==='put'){
+      onSessionTop(p[0],data);
+    }else if(type==='put'){
+      onSessionDeep(p[0],p.slice(1),data);
+    }else if(data&&typeof data==='object'){
+      for(const[k,val]of Object.entries(data))onSessionDeep(p[0],[...p.slice(1),k],val);
     }
   });
+}
+
+function onSessionTop(vid,s){
+  if(!s){closeViewer(vid);return;}
+  const v=viewers[vid];
+  // Each viewer attempt writes a fresh request id and no offer; anything else is our own write echoing back
+  if(s.request&&!s.offer&&v?.reqId!==s.request){
+    closeViewer(vid);
+    handleViewer(vid,s.request,s.name,s.email,s.device).catch(e=>{st('Viewer err: '+e.message);dl('viewer err: '+e.message);});
+    return;
+  }
+  // A full snapshot (first load or a reopened stream) can carry replies sent while we weren't listening
+  if(v&&v.reqId===s.request){
+    if(s.answer)onSessionDeep(vid,['answer'],s.answer);
+    if(s.ice_viewer)onSessionDeep(vid,['ice_viewer'],s.ice_viewer);
+  }
+}
+
+function onSessionDeep(vid,sub,val){
+  const v=viewers[vid];
+  if(!v||!v.onAnswer)return;
+  if(sub[0]==='answer'&&sub.length===1)v.onAnswer(val);
+  else if(sub[0]==='ice_viewer'&&sub.length===1){
+    if(val&&typeof val==='object')for(const[k,c]of Object.entries(val))v.onIce(k,c);
+  }else if(sub[0]==='ice_viewer'&&sub.length===2)v.onIce(sub[1],val);
 }
 
 async function handleViewer(vid,reqId,name,email,device){
@@ -139,14 +174,16 @@ async function handleViewer(vid,reqId,name,email,device){
   const dev=device?' · '+String(device).slice(0,59):'';
   const label=(shortName+(email?' ('+String(email).slice(0,80)+')':'')+dev).slice(0,199);
   // Whitelisted viewers have no valid grant and are never cut off by enforceAccess
-  const v={pc,reqId,name:shortName+dev,label,viaGrant:grantValid(vid),listeners:[]};
+  const v={pc,reqId,name:shortName+dev,label,viaGrant:grantValid(vid)};
   viewers[vid]=v;
   const live=()=>viewers[vid]===v;
+  dl('request from '+label);
   let s;
   try{
     s=await ensureStream(label);
   }catch(e){
     st('Camera error: '+e.message);
+    dl('camera error: '+e.message);
     closeViewer(vid);
     return;
   }
@@ -159,37 +196,36 @@ async function handleViewer(vid,reqId,name,email,device){
   };
   pc.onconnectionstatechange=()=>{
     const s=pc.connectionState;
+    dl(v.name+': '+s);
     if(s==='connected'&&!v.started){v.started=true;logEv('watch-start',vid,v.label);}
     if((s==='failed'||s==='closed')&&live())closeViewer(vid);
     else updateCount();
+  };
+
+  // Fed by the shared /sessions stream. Viewer candidates can arrive before its answer;
+  // hold them until the remote description is set.
+  const pending=[];
+  const added=new Set();
+  let answered=false;
+  v.onAnswer=async sdp=>{
+    if(typeof sdp!=='string'||answered||!live())return;
+    answered=true;
+    try{
+      await pc.setRemoteDescription({type:'answer',sdp});
+      pending.splice(0).forEach(c=>pc.addIceCandidate(c).catch(()=>{}));
+    }catch(e){st('Answer err: '+e.message);dl('answer err: '+e.message);}
+  };
+  v.onIce=(k,c)=>{
+    if(added.has(k)||!c||!c.candidate||!live())return;
+    added.add(k);
+    if(pc.remoteDescription)pc.addIceCandidate(c).catch(()=>{});
+    else pending.push(c);
   };
 
   const offer=await pc.createOffer();
   await pc.setLocalDescription(offer);
   if(!live())return;
   await dbw('/sessions/'+vid+'/offer.json','PUT',offer.sdp);
-
-  // Viewer candidates can arrive before its answer; hold them until the remote description is set
-  const pending=[];
-  let answered=false;
-  v.listeners.push(sse('/sessions/'+vid+'/answer.json',async(type,path,sdp)=>{
-    if(typeof sdp!=='string'||answered||!live())return;
-    answered=true;
-    try{
-      await pc.setRemoteDescription({type:'answer',sdp});
-      pending.splice(0).forEach(c=>pc.addIceCandidate(c).catch(()=>{}));
-    }catch(e){st('Answer err: '+e.message);}
-  }));
-
-  const added=new Set();
-  v.listeners.push(sse('/sessions/'+vid+'/ice_viewer.json',(type,path,data)=>{
-    for(const[k,c]of kids(type,path,data)){
-      if(added.has(k)||!c||!c.candidate)continue;
-      added.add(k);
-      if(pc.remoteDescription)pc.addIceCandidate(c).catch(()=>{});
-      else pending.push(c);
-    }
-  }));
 }
 
 start().catch(e=>st('Fatal: '+e.message));
@@ -209,6 +245,7 @@ export default function HomeModeScreen() {
   const [dark, setDark] = useState(false);
   const [peek, setPeek] = useState(false);
   const promptingRef = useRef(false);
+  const lastStatusRef = useRef(null);
   const uid = auth.currentUser?.uid;
 
   // Presence: Firebase drops /heartbeat if this phone loses its connection; re-set it on every reconnect
@@ -222,6 +259,7 @@ export default function HomeModeScreen() {
         await set(hbRef, { ts: serverTimestamp(), uid });
       } catch (e) {
         setStatus('Heartbeat error: ' + (e?.message ?? String(e)));
+        dlog('heartbeat error: ' + (e?.message ?? String(e)));
       }
     });
     return () => {
@@ -230,6 +268,24 @@ export default function HomeModeScreen() {
       remove(hbRef).catch(() => {});
       remove(ref(db, '/sessions')).catch(() => {});
     };
+  }, [online]);
+
+  // The admin's "Export logs" reads this copy; only uploaded when something new was logged
+  useEffect(() => {
+    if (!online) return;
+    let uploaded = -1;
+    const upload = () => {
+      if (logVersion() === uploaded) return;
+      uploaded = logVersion();
+      set(ref(db, '/debug/home'), {
+        ts: serverTimestamp(),
+        device: String(Platform.constants?.Model ?? 'phone').slice(0, 59),
+        lines: getLines(),
+      }).catch(() => {});
+    };
+    upload();
+    const timer = setInterval(upload, LOG_UPLOAD_MS);
+    return () => { clearInterval(timer); upload(); };
   }, [online]);
 
   // Dark mode keeps the camera streaming under a black overlay; on AMOLED black pixels are off
@@ -252,6 +308,7 @@ export default function HomeModeScreen() {
     const hbRef = ref(db, '/heartbeat');
     const sub = AppState.addEventListener('change', (state) => {
       if (promptingRef.current) return; // the stop() device prompt can briefly background the app
+      dlog('app state: ' + state);
       if (state === 'background') {
         remove(hbRef).catch(() => {});
         logEvent('home-paused', { detail: 'Screen off or app left; camera unavailable' });
@@ -292,10 +349,15 @@ export default function HomeModeScreen() {
   function onMessage(e) {
     try {
       const msg = JSON.parse(e.nativeEvent.data);
-      if (msg.t === 's') setStatus(msg.m);
+      if (msg.t === 's') {
+        setStatus(msg.m);
+        if (msg.m !== lastStatusRef.current) dlog('status: ' + msg.m);
+        lastStatusRef.current = msg.m;
+      }
+      else if (msg.t === 'log') dlog(msg.m);
       else if (msg.t === 'viewers') setViewers(msg.names);
-      else if (msg.t === 'ready') setOnline(true);
-      else if (msg.t === 'camera') setCameraOn(msg.on);
+      else if (msg.t === 'ready') { setOnline(true); dlog('home online'); }
+      else if (msg.t === 'camera') { setCameraOn(msg.on); dlog('camera ' + (msg.on ? 'on' : 'off')); }
       else if (msg.t === 'needToken') pushFreshToken();
     } catch {}
   }

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Share, Alert, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Share, Alert, ActivityIndicator, Platform } from 'react-native';
 import { router } from 'expo-router';
-import { ref, onValue, set, remove, query, limitToLast, serverTimestamp } from 'firebase/database';
+import { ref, get, onValue, set, remove, query, limitToLast, serverTimestamp } from 'firebase/database';
+import { dlog, getLines } from '../debug-log';
 import { db, WEB_URL } from '../config';
 import {
   generateTicketCode, formatCode, formatDuration, isAdmin, confirmWithDevice, logEvent, resetAttempts, CODE_ATTEMPT_LIMIT, TICKET_REDEEM_WINDOW_MS,
@@ -63,6 +64,7 @@ export default function AdminScreen() {
   const [log, setLog] = useState({});
   const [requests, setRequests] = useState({});
   const [attempts, setAttempts] = useState({});
+  const [exporting, setExporting] = useState(false);
   const [codeFor, setCodeFor] = useState(null); // uid whose duration picker is open
   const [now, setNow] = useState(Date.now());
 
@@ -97,6 +99,7 @@ export default function AdminScreen() {
       await action();
     } catch (e) {
       setError(e?.message ?? String(e));
+      dlog(`admin error (${prompt}): ${e?.message ?? String(e)}`);
     }
   }
 
@@ -186,6 +189,52 @@ export default function AdminScreen() {
 
   function cancelTicket(code) {
     guarded('Cancel access code', () => remove(ref(db, `/tickets/${code}`)));
+  }
+
+  // Shared as text so it can be saved or sent anywhere; capped to stay under Android's share size limit
+  async function exportLogs() {
+    setError(null);
+    setExporting(true);
+    try {
+      let homeError = null;
+      const [homeSnap, logSnap] = await Promise.all([
+        get(ref(db, '/debug/home')).catch((e) => { homeError = e?.message ?? String(e); return null; }),
+        get(query(ref(db, '/log'), limitToLast(300))),
+      ]);
+      const home = homeSnap?.val();
+      const iso = (ms) => (typeof ms === 'number' ? new Date(ms).toISOString() : '?');
+      const sessionList = Object.entries(sessions).filter(([, s]) => s?.request);
+      const out = [
+        `PetTV logs, exported ${new Date().toISOString()}`,
+        `Admin phone: ${Platform.constants?.Model ?? 'unknown'}`,
+        '',
+        '== Current state ==',
+        `Sessions: ${sessionList.length}`,
+        ...sessionList.map(([uid, s]) =>
+          `  ${s.name ?? uid} | ${s.email ?? ''} | ${s.device ?? ''} | offer:${s.offer ? 'y' : 'n'} answer:${s.answer ? 'y' : 'n'} ice home/viewer:${Object.keys(s.ice_home ?? {}).length}/${Object.keys(s.ice_viewer ?? {}).length}`),
+        `Pending requests: ${Object.keys(requests).length}`,
+        `Active grants: ${Object.values(grants).filter(g => g.redeemedAt + g.accessMs > Date.now()).length}`,
+        `Locked out: ${Object.values(attempts).filter(a => a.count >= CODE_ATTEMPT_LIMIT).length}`,
+        `Blocked: ${Object.keys(blocked).length}`,
+        '',
+        home ? `== Home phone (${home.device ?? '?'}, uploaded ${iso(home.ts)}) ==` : '== Home phone ==',
+        ...(home?.lines ? Object.values(home.lines)
+          : [homeError ? `Could not read home logs: ${homeError}` : 'No logs uploaded yet. They appear once the home phone has been running.']),
+        '',
+        '== This admin phone ==',
+        ...getLines(),
+        '',
+        '== Activity (last 300) ==',
+        ...Object.values(logSnap.val() || {})
+          .sort((a, b) => b.ts - a.ts)
+          .map(e => [iso(e.ts), e.event, e.email, e.detail].filter(Boolean).join(' | ')),
+      ];
+      await Share.share({ title: 'PetTV logs', message: out.join('\n').slice(0, 300000) });
+    } catch (e) {
+      setError(`Export failed: ${e?.message ?? String(e)}`);
+    } finally {
+      setExporting(false);
+    }
   }
 
   function resetLock(p) {
@@ -388,6 +437,10 @@ export default function AdminScreen() {
         </View>
       ))}
 
+      <TouchableOpacity style={[styles.primaryBtn, styles.exportBtn]} onPress={exportLogs} disabled={exporting}>
+        <Text style={styles.primaryText}>{exporting ? 'Collecting logs…' : '📄 Export logs'}</Text>
+      </TouchableOpacity>
+
       <TouchableOpacity style={styles.doneBtn} onPress={() => router.replace('/role-picker')}>
         <Text style={styles.link}>Done</Text>
       </TouchableOpacity>
@@ -421,6 +474,7 @@ const styles = StyleSheet.create({
   logWho: { fontSize: 13, color: '#555' },
   primaryBtn: { paddingHorizontal: 36, paddingVertical: 14, borderRadius: 12, backgroundColor: '#4A90E2' },
   primaryText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  exportBtn: { alignSelf: 'center', marginTop: 24 },
   doneBtn: { alignItems: 'center', marginTop: 24 },
   link: { color: '#4A90E2', fontSize: 16, fontWeight: '600' },
 });

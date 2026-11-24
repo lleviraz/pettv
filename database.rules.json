@@ -72,6 +72,19 @@
         "$other":   { ".validate": false }
       }
     },
+    "debug": {
+      ".read": "auth != null && auth.uid === root.child('admin/uid').val()",
+      "home": {
+        ".write": "auth != null && auth.uid === root.child('home/uid').val()",
+        ".validate": "newData.hasChildren(['ts', 'lines'])",
+        "ts":     { ".validate": "newData.val() === now" },
+        "device": { ".validate": "newData.isString() && newData.val().length < 60" },
+        "lines": {
+          "$i": { ".validate": "$i.matches(/^[0-9]{1,3}$/) && newData.isString() && newData.val().length <= 300" }
+        },
+        "$other": { ".validate": false }
+      }
+    },
     "log": {
       ".read": "auth != null && auth.uid === root.child('admin/uid').val()",
       "$id": {

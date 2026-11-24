@@ -387,3 +387,26 @@ describe('code guessing limit', () => {
     await assertSucceeds(redeem(as(GUEST), GUEST, 'GUESTCODE'));
   });
 });
+
+describe('home phone debug log', () => {
+  const upload = (db, overrides = {}) => db.ref('debug/home').set({ ts: SERVER_TS, device: 'SM-A715F', lines: ['line one', 'line two'], ...overrides });
+
+  test('only the home phone can upload it and only the admin can read it', async () => {
+    await assertSucceeds(upload(as(HOME)));
+    await assertSucceeds(as(ADMIN).ref('debug/home').get());
+    await assertFails(as(HOME).ref('debug/home').get());
+    await assertFails(as(FAMILY).ref('debug').get());
+    await assertFails(upload(as(FAMILY)));
+    await assertFails(upload(as(ADMIN)));
+    await assertFails(upload(anon()));
+  });
+
+  test('size and shape are bounded', async () => {
+    await assertFails(upload(as(HOME), { lines: ['x'.repeat(301)] }));
+    await assertFails(upload(as(HOME), { lines: { 1000: 'too many' } }));
+    await assertFails(upload(as(HOME), { lines: { name: 'not an index' } }));
+    await assertFails(upload(as(HOME), { ts: Date.now() }));
+    await assertFails(upload(as(HOME), { extra: 'field' }));
+    await assertFails(upload(as(HOME), { device: 'x'.repeat(80) }));
+  });
+});
