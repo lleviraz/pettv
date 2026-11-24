@@ -4,7 +4,7 @@ import { router } from 'expo-router';
 import { ref, onValue, set, remove, query, limitToLast, serverTimestamp } from 'firebase/database';
 import { db, WEB_URL } from '../config';
 import {
-  generateTicketCode, formatCode, formatDuration, isAdmin, confirmWithDevice, logEvent, resetAttempts, TICKET_REDEEM_WINDOW_MS,
+  generateTicketCode, formatCode, formatDuration, isAdmin, confirmWithDevice, logEvent, resetAttempts, CODE_ATTEMPT_LIMIT, TICKET_REDEEM_WINDOW_MS,
 } from '../access';
 
 const EVENT_LABELS = {
@@ -25,9 +25,8 @@ const EVENT_LABELS = {
   'revoked': '↩️ Access revoked',
   'blocked': '🚫 Blocked',
   'unblocked': '🔓 Unblocked',
-  'code-locked': '🔒 Code attempts locked',
-  'req-locked': '🔒 Request attempts locked',
-  'attempts-reset': '🔓 Attempts reset',
+  'code-locked': '🔒 Locked out (wrong codes)',
+  'attempts-reset': '🔓 Unlocked code entry',
 };
 
 const HOUR = 60 * 60 * 1000;
@@ -39,7 +38,7 @@ const DURATIONS = [
 ];
 
 // For events the home phone or admin logs about someone else, the viewer's name is in detail
-const ABOUT_OTHERS = new Set(['watch-start', 'watch-stop', 'revoked', 'blocked', 'unblocked', 'home-changed']);
+const ABOUT_OTHERS = new Set(['watch-start', 'watch-stop', 'revoked', 'blocked', 'unblocked', 'home-changed', 'attempts-reset']);
 
 function describeActor(e) {
   if (ABOUT_OTHERS.has(e.event)) return e.detail ?? e.subject ?? '';
@@ -190,7 +189,7 @@ export default function AdminScreen() {
   }
 
   function resetLock(p) {
-    guarded('Reset attempt counter', async () => {
+    guarded('Unlock code entry', async () => {
       await resetAttempts(p.uid);
       logEvent('attempts-reset', { subject: p.uid, detail: personLabel(p).slice(0, 199) });
     });
@@ -227,11 +226,8 @@ export default function AdminScreen() {
   }
 
   const lockedOut = Object.entries(attempts)
-    .filter(([, a]) => (a.codeCount ?? 0) >= 5 || (a.reqCount ?? 0) >= 5)
-    .map(([uid, a]) => ({ uid, codeCount: a.codeCount ?? 0, reqCount: a.reqCount ?? 0,
-      ...grants[uid] && { name: grants[uid].name, email: grants[uid].email },
-      ...requests[uid] && { name: requests[uid].name, email: requests[uid].email },
-    }));
+    .filter(([, a]) => a.count >= CODE_ATTEMPT_LIMIT)
+    .map(([uid, a]) => ({ uid, name: requests[uid]?.name ?? a.email, email: a.email, ts: a.ts }));
 
   const activeGrants = Object.entries(grants)
     .map(([uid, g]) => ({ uid, ...g, until: g.redeemedAt + g.accessMs }))
@@ -370,16 +366,14 @@ export default function AdminScreen() {
       {lockedOut.map(p => (
         <View key={p.uid} style={styles.row}>
           <View style={styles.rowText}>
-            <Text style={styles.rowTitle} numberOfLines={1}>{p.name ?? p.uid}</Text>
-            <Text style={styles.rowSub} numberOfLines={1}>
-              {p.email ? `${p.email} · ` : ''}
-              {p.codeCount >= 5 ? `${p.codeCount} wrong codes` : ''}
-              {p.codeCount >= 5 && p.reqCount >= 5 ? ' · ' : ''}
-              {p.reqCount >= 5 ? `${p.reqCount} requests` : ''}
-            </Text>
+            <Text style={styles.rowTitle} numberOfLines={1}>{p.name}</Text>
+            <Text style={styles.rowSub} numberOfLines={1}>{CODE_ATTEMPT_LIMIT} wrong codes · last {fmtTime(p.ts)}</Text>
           </View>
           <TouchableOpacity style={styles.neutralBtn} onPress={() => resetLock(p)}>
-            <Text style={styles.neutralText}>Reset</Text>
+            <Text style={styles.neutralText}>Unlock</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.dangerBtn} onPress={() => block(p)}>
+            <Text style={styles.dangerText}>Block</Text>
           </TouchableOpacity>
         </View>
       ))}

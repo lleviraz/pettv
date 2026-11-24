@@ -57,8 +57,16 @@ function anon() {
   return env.unauthenticatedContext().database();
 }
 
-function redeem(db, uid, code, grantOverrides = {}, keepTicket = false) {
+function attempt(db, uid, code, overrides = {}) {
+  return db.ref(`attempts/${uid}`).set({ count: 1, lastCode: code, email: emailOf(uid), ts: SERVER_TS, ...overrides });
+}
+
+// Mirrors the clients: record the guess as a counted attempt, then redeem in one atomic update
+async function redeem(db, uid, code, grantOverrides = {}, keepTicket = false) {
+  const prev = (await db.ref(`attempts/${uid}`).get()).val();
+  await attempt(db, uid, code, { count: (prev?.count ?? 0) + 1 });
   const updates = {
+    [`attempts/${uid}`]: null,
     [`grants/${uid}`]: {
       code,
       redeemedAt: SERVER_TS,
@@ -107,10 +115,13 @@ describe('signed-in stranger (no access)', () => {
     }
   });
 
-  test('can read only its own whitelist entry and a ticket whose code it knows', async () => {
+  test('can read only its own whitelist entry, and a ticket only after recording the guess', async () => {
     await assertSucceeds(as(STRANGER).ref(`whitelist/${STRANGER}`).get());
     await assertFails(as(STRANGER).ref(`whitelist/${FAMILY}`).get());
+    await assertFails(as(STRANGER).ref('tickets/GUESTCODE').get());
+    await assertSucceeds(attempt(as(STRANGER), STRANGER, 'GUESTCODE'));
     await assertSucceeds(as(STRANGER).ref('tickets/GUESTCODE').get());
+    await assertFails(as(STRANGER).ref('tickets/OLDCODE01').get());
   });
 
   test('cannot grant itself access or change admin data', async () => {
@@ -306,72 +317,73 @@ describe('admin', () => {
   });
 });
 
-describe('attempt limits', () => {
-  test('owner can increment codeCount by 1 from zero', async () => {
-    await assertSucceeds(as(GUEST).ref(`attempts/${GUEST}/codeCount`).set(1));
+describe('code guessing limit', () => {
+  const lockedAt = (uid, count, code = 'WRONG001') => env.withSecurityRulesDisabled((ctx) =>
+    ctx.database().ref(`attempts/${uid}`).set({ count, lastCode: code, email: emailOf(uid), ts: Date.now() }));
+
+  test('redeeming without a recorded guess for that exact code is refused', async () => {
+    const direct = () => as(GUEST).ref().update({
+      [`grants/${GUEST}`]: { code: 'GUESTCODE', redeemedAt: SERVER_TS, accessMs: HOUR, name: 'G', email: emailOf(GUEST) },
+      'tickets/GUESTCODE': null,
+    });
+    await assertFails(direct());
+    await assertSucceeds(attempt(as(GUEST), GUEST, 'WRONG001'));
+    await assertFails(direct());
   });
 
-  test('owner can increment codeCount step by step', async () => {
-    await env.withSecurityRulesDisabled((ctx) => ctx.database().ref(`attempts/${GUEST}/codeCount`).set(3));
-    await assertSucceeds(as(GUEST).ref(`attempts/${GUEST}/codeCount`).set(4));
+  test('each guess must count up by exactly one', async () => {
+    await assertFails(attempt(as(GUEST), GUEST, 'AAAAAAAA', { count: 2 }));
+    await assertFails(attempt(as(GUEST), GUEST, 'AAAAAAAA', { count: 0 }));
+    await assertSucceeds(attempt(as(GUEST), GUEST, 'AAAAAAAA', { count: 1 }));
+    await assertFails(attempt(as(GUEST), GUEST, 'BBBBBBBB', { count: 1 }));
+    await assertFails(attempt(as(GUEST), GUEST, 'BBBBBBBB', { count: 3 }));
+    await assertSucceeds(attempt(as(GUEST), GUEST, 'BBBBBBBB', { count: 2 }));
   });
 
-  test('owner cannot skip counts or decrement', async () => {
-    await assertFails(as(GUEST).ref(`attempts/${GUEST}/codeCount`).set(2)); // must start at 1
-    await env.withSecurityRulesDisabled((ctx) => ctx.database().ref(`attempts/${GUEST}/codeCount`).set(3));
-    await assertFails(as(GUEST).ref(`attempts/${GUEST}/codeCount`).set(5)); // skip
-    await assertFails(as(GUEST).ref(`attempts/${GUEST}/codeCount`).set(2)); // decrement
-    await assertFails(as(GUEST).ref(`attempts/${GUEST}/codeCount`).set(0)); // reset to 0
-  });
-
-  test('owner cannot write arbitrary fields', async () => {
-    await assertFails(as(GUEST).ref(`attempts/${GUEST}/other`).set(1));
-  });
-
-  test('stranger cannot touch another user\'s attempts', async () => {
-    await assertFails(as(STRANGER).ref(`attempts/${GUEST}/codeCount`).set(1));
-    await assertFails(as(STRANGER).ref(`attempts/${GUEST}`).remove());
-  });
-
-  test('code redemption is blocked when codeCount >= 5', async () => {
-    await env.withSecurityRulesDisabled((ctx) => ctx.database().ref(`attempts/${GUEST}/codeCount`).set(5));
+  test('the fifth guess is the last; after that even the right code is refused', async () => {
+    await lockedAt(GUEST, 4);
+    await assertSucceeds(attempt(as(GUEST), GUEST, 'WRONG002', { count: 5 }));
+    await assertFails(attempt(as(GUEST), GUEST, 'GUESTCODE', { count: 6 }));
+    await assertFails(as(GUEST).ref('tickets/GUESTCODE').get());
     await assertFails(redeem(as(GUEST), GUEST, 'GUESTCODE'));
   });
 
-  test('code redemption succeeds when codeCount is 4', async () => {
-    await env.withSecurityRulesDisabled((ctx) => ctx.database().ref(`attempts/${GUEST}/codeCount`).set(4));
+  test('the right code on the fifth try still works', async () => {
+    await lockedAt(GUEST, 4);
     await assertSucceeds(redeem(as(GUEST), GUEST, 'GUESTCODE'));
-  });
-
-  test('new request is blocked when reqCount >= 5', async () => {
-    await env.withSecurityRulesDisabled((ctx) => ctx.database().ref(`attempts/${STRANGER}/reqCount`).set(5));
-    await assertFails(request(as(STRANGER), STRANGER));
-  });
-
-  test('new request succeeds when reqCount is 4', async () => {
-    await env.withSecurityRulesDisabled((ctx) => ctx.database().ref(`attempts/${STRANGER}/reqCount`).set(4));
-    await assertSucceeds(request(as(STRANGER), STRANGER));
-  });
-
-  test('withdrawing a pending request is allowed even when reqCount >= 5', async () => {
     await env.withSecurityRulesDisabled(async (ctx) => {
-      await ctx.database().ref(`requests/${STRANGER}`).set({ name: 'S', email: emailOf(STRANGER), type: 'viewer', ts: Date.now() });
-      await ctx.database().ref(`attempts/${STRANGER}/reqCount`).set(5);
+      if ((await ctx.database().ref(`attempts/${GUEST}`).get()).exists()) throw new Error('attempts should be cleared after a successful redemption');
     });
-    await assertSucceeds(as(STRANGER).ref(`requests/${STRANGER}`).remove());
   });
 
-  test('admin can read all attempts and reset any user', async () => {
-    await env.withSecurityRulesDisabled((ctx) => ctx.database().ref(`attempts/${GUEST}/codeCount`).set(5));
+  test('the counter cannot be cleared or faked by its owner', async () => {
+    await lockedAt(GUEST, 5);
+    await assertFails(as(GUEST).ref(`attempts/${GUEST}`).remove());
+    await assertFails(attempt(as(GUEST), GUEST, 'AAAAAAAA', { count: 1 }));
+    await env.clearDatabase();
+    await assertFails(attempt(as(STRANGER), STRANGER, 'AAAAAAAA', { email: 'boss@example.com' }));
+    await assertFails(attempt(as(STRANGER), STRANGER, 'AAAAAAAA', { ts: Date.now() }));
+    await assertFails(attempt(as(STRANGER), STRANGER, 'AAAAAAAA', { extra: 1 }));
+    await assertFails(attempt(as(STRANGER), STRANGER, ''));
+  });
+
+  test('nobody else can read or write someone\'s counter', async () => {
+    await lockedAt(GUEST, 2);
+    await assertFails(as(STRANGER).ref(`attempts/${GUEST}`).get());
+    await assertFails(attempt(as(STRANGER), GUEST, 'AAAAAAAA', { count: 3 }));
+    await assertFails(as(STRANGER).ref(`attempts/${GUEST}`).remove());
+    await assertFails(as(GUEST).ref('attempts').get());
+    await assertSucceeds(as(GUEST).ref(`attempts/${GUEST}`).get());
+  });
+
+  test('a blocked user cannot record guesses', async () => {
+    await assertFails(attempt(as(BLOCKED), BLOCKED, 'BLOCKCODE'));
+  });
+
+  test('the admin sees all counters and can unlock someone', async () => {
+    await lockedAt(GUEST, 5);
     await assertSucceeds(as(ADMIN).ref('attempts').get());
     await assertSucceeds(as(ADMIN).ref(`attempts/${GUEST}`).remove());
-    // After reset, redemption works again
     await assertSucceeds(redeem(as(GUEST), GUEST, 'GUESTCODE'));
-  });
-
-  test('owner can read its own attempts', async () => {
-    await env.withSecurityRulesDisabled((ctx) => ctx.database().ref(`attempts/${GUEST}/codeCount`).set(3));
-    await assertSucceeds(as(GUEST).ref(`attempts/${GUEST}`).get());
-    await assertFails(as(GUEST).ref('attempts').get()); // cannot list all
   });
 });

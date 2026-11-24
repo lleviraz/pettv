@@ -3,18 +3,8 @@ import * as Crypto from 'expo-crypto';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { auth, db } from './config';
 
-const CODE_ATTEMPT_LIMIT = 5;
-const REQ_ATTEMPT_LIMIT = 5;
-
-async function getAttemptCount(uid, type) {
-  const snap = await get(ref(db, `/attempts/${uid}/${type}`)).catch(() => null);
-  return snap?.val() ?? 0;
-}
-
-async function incrementAttempt(uid, type, current) {
-  await set(ref(db, `/attempts/${uid}/${type}`), current + 1).catch(() => {});
-  return current + 1;
-}
+export const CODE_ATTEMPT_LIMIT = 5;
+const LOCKED_MSG = 'Too many wrong codes. Ask the owner to unlock you.';
 
 export async function resetAttempts(uid) {
   return remove(ref(db, `/attempts/${uid}`));
@@ -67,38 +57,39 @@ export async function hasViewerAccess(uid) {
   return !!g && g.redeemedAt + g.accessMs > Date.now();
 }
 
-// Grant write and ticket delete must be one atomic update: the rules only allow
-// the grant if the ticket disappears in the same write, which makes tickets single-use
+// Each guess must first be recorded as a counted attempt: the rules only let you read or redeem
+// the code you just recorded, and stop recording after CODE_ATTEMPT_LIMIT until the admin resets.
+// Grant write and ticket delete must be one atomic update, which makes tickets single-use.
 export async function redeemTicket(rawCode) {
   const code = normalizeCode(rawCode);
   const user = auth.currentUser;
+  if (code.length !== 8) throw new Error('Enter the 8-character code');
 
-  const codeCount = await getAttemptCount(user.uid, 'codeCount');
-  if (codeCount >= CODE_ATTEMPT_LIMIT) {
-    throw new Error('Too many failed attempts. Ask the owner to reset your access.');
+  const prev = (await get(ref(db, `/attempts/${user.uid}`)).catch(() => null))?.val();
+  const count = (prev?.count ?? 0) + 1;
+  if (count > CODE_ATTEMPT_LIMIT) throw new Error(LOCKED_MSG);
+  try {
+    await set(ref(db, `/attempts/${user.uid}`), { count, lastCode: code, email: user.email, ts: serverTimestamp() });
+  } catch {
+    throw new Error(LOCKED_MSG);
   }
 
-  const snap = await get(ref(db, `/tickets/${code}`)).catch(() => null);
-  const ticket = snap?.val();
-
-  if (!ticket || ticket.expires < Date.now()) {
-    const next = await incrementAttempt(user.uid, 'codeCount', codeCount);
-    if (next >= CODE_ATTEMPT_LIMIT) logEvent('code-locked', { detail: `locked after ${CODE_ATTEMPT_LIMIT} failed code attempts` });
-    const remaining = CODE_ATTEMPT_LIMIT - next;
-    throw new Error(remaining <= 0
-      ? 'Too many failed attempts. Ask the owner to reset your access.'
-      : `Invalid or expired code (${remaining} attempt${remaining === 1 ? '' : 's'} left)`);
-  }
-  if (ticket.uid !== user.uid) {
-    const next = await incrementAttempt(user.uid, 'codeCount', codeCount);
-    if (next >= CODE_ATTEMPT_LIMIT) logEvent('code-locked', { detail: `locked after ${CODE_ATTEMPT_LIMIT} failed code attempts` });
-    throw new Error('This code was issued for a different account');
+  const ticket = (await get(ref(db, `/tickets/${code}`)).catch(() => null))?.val();
+  if (!ticket || ticket.expires < Date.now() || ticket.uid !== user.uid) {
+    if (count === CODE_ATTEMPT_LIMIT) {
+      logEvent('code-locked', { detail: `${CODE_ATTEMPT_LIMIT} wrong codes, Android app` });
+      throw new Error(LOCKED_MSG);
+    }
+    const left = CODE_ATTEMPT_LIMIT - count;
+    const reason = ticket && ticket.uid !== user.uid ? 'This code was issued for a different account' : 'Invalid or expired code';
+    throw new Error(`${reason} (${left} ${left === 1 ? 'try' : 'tries'} left)`);
   }
 
   const logKey = push(ref(db, '/log')).key;
   await update(ref(db), {
     [`log/${logKey}`]: logEntry('redeemed', { detail: `code ${formatCode(code)}, ${formatDuration(ticket.accessMs)}` }),
     [`requests/${user.uid}`]: null,
+    [`attempts/${user.uid}`]: null,
     [`grants/${user.uid}`]: {
       code,
       redeemedAt: serverTimestamp(),
@@ -113,12 +104,6 @@ export async function redeemTicket(rawCode) {
 // The rules require email to match the verified Google email, so the admin always sees the real address
 export async function requestAccess(type = 'viewer') {
   const user = auth.currentUser;
-
-  const reqCount = await getAttemptCount(user.uid, 'reqCount');
-  if (reqCount >= REQ_ATTEMPT_LIMIT) {
-    throw new Error('Too many access requests. Ask the owner to reset your account.');
-  }
-
   await update(ref(db), {
     [`requests/${user.uid}`]: {
       name: (user.displayName || user.email || 'Viewer').slice(0, 99),
@@ -128,9 +113,6 @@ export async function requestAccess(type = 'viewer') {
     },
     [`log/${push(ref(db, '/log')).key}`]: logEntry(type === 'home' ? 'requested-home' : 'requested', { detail: 'Android app' }),
   });
-
-  const next = await incrementAttempt(user.uid, 'reqCount', reqCount);
-  if (next >= REQ_ATTEMPT_LIMIT) logEvent('req-locked', { detail: `locked after ${REQ_ATTEMPT_LIMIT} access requests` });
 }
 
 export async function isHomeAccount() {

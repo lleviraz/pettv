@@ -39,14 +39,14 @@
       ".read": "auth != null && auth.uid === root.child('admin/uid').val()",
       "$uid": {
         ".read":  "auth != null && auth.uid === $uid",
-        ".write": "auth != null && (auth.uid === root.child('admin/uid').val() || (auth.uid === $uid && !root.child('blocked').child(auth.uid).exists() && (!data.exists() || !newData.exists()) && (!newData.exists() || !root.child('attempts').child($uid).child('reqCount').exists() || root.child('attempts').child($uid).child('reqCount').val() < 5)))",
+        ".write": "auth != null && (auth.uid === root.child('admin/uid').val() || (auth.uid === $uid && !root.child('blocked').child(auth.uid).exists() && (!data.exists() || !newData.exists())))",
         ".validate": "newData.hasChildren(['name', 'email', 'ts', 'type']) && newData.child('name').isString() && newData.child('name').val().length < 100 && newData.child('email').val() === auth.token.email && auth.token.email_verified === true && newData.child('ts').val() === now && (newData.child('type').val() === 'viewer' || newData.child('type').val() === 'home')"
       }
     },
     "tickets": {
       ".read": "auth != null && auth.uid === root.child('admin/uid').val()",
       "$code": {
-        ".read":  "auth != null",
+        ".read":  "auth != null && root.child('attempts').child(auth.uid).child('lastCode').val() === $code",
         ".write": "auth != null && (auth.uid === root.child('admin/uid').val() || (!newData.exists() && newData.parent().parent().child('grants').child(auth.uid).child('code').val() === $code))",
         ".validate": "newData.hasChildren(['uid', 'expires', 'accessMs']) && newData.child('uid').isString() && newData.child('expires').isNumber() && newData.child('accessMs').isNumber() && newData.child('accessMs').val() > 0 && newData.child('accessMs').val() <= 2678400000"
       }
@@ -55,7 +55,7 @@
       ".read": "auth != null && (auth.uid === root.child('admin/uid').val() || auth.uid === root.child('home/uid').val())",
       "$uid": {
         ".read":  "auth != null && auth.uid === $uid",
-        ".write": "auth != null && (auth.uid === root.child('admin/uid').val() || (auth.uid === $uid && newData.exists() && !root.child('blocked').child(auth.uid).exists() && (!root.child('attempts').child(auth.uid).child('codeCount').exists() || root.child('attempts').child(auth.uid).child('codeCount').val() < 5) && root.child('tickets').child(newData.child('code').val()).child('uid').val() === auth.uid && root.child('tickets').child(newData.child('code').val()).child('expires').val() > now && !newData.parent().parent().child('tickets').child(newData.child('code').val()).exists()))",
+        ".write": "auth != null && (auth.uid === root.child('admin/uid').val() || (auth.uid === $uid && newData.exists() && !root.child('blocked').child(auth.uid).exists() && root.child('attempts').child(auth.uid).child('lastCode').val() === newData.child('code').val() &&root.child('tickets').child(newData.child('code').val()).child('uid').val() === auth.uid && root.child('tickets').child(newData.child('code').val()).child('expires').val() > now && !newData.parent().parent().child('tickets').child(newData.child('code').val()).exists()))",
         ".validate": "auth.uid === root.child('admin/uid').val() || (newData.hasChildren(['code', 'redeemedAt', 'accessMs', 'name', 'email']) && newData.child('email').val() === auth.token.email && newData.child('redeemedAt').val() === now && newData.child('accessMs').val() === root.child('tickets').child(newData.child('code').val()).child('accessMs').val() && newData.child('name').isString() && newData.child('name').val().length < 100)"
       }
     },
@@ -63,14 +63,13 @@
       ".read": "auth != null && auth.uid === root.child('admin/uid').val()",
       "$uid": {
         ".read": "auth != null && auth.uid === $uid",
-        ".write": "auth != null && auth.uid === root.child('admin/uid').val()",
-        "codeCount": {
-          ".write": "auth != null && auth.uid === $uid && newData.isNumber() && (!data.exists() ? newData.val() === 1 : newData.val() === data.val() + 1)"
-        },
-        "reqCount": {
-          ".write": "auth != null && auth.uid === $uid && newData.isNumber() && (!data.exists() ? newData.val() === 1 : newData.val() === data.val() + 1)"
-        },
-        "$other": { ".validate": false }
+        ".write": "auth != null && (auth.uid === root.child('admin/uid').val() || (auth.uid === $uid && (newData.exists() ? !root.child('blocked').child(auth.uid).exists() && (data.exists() ? data.child('count').val() < 5 && newData.child('count').val() === data.child('count').val() + 1 : newData.child('count').val() === 1) : newData.parent().parent().child('grants').child($uid).child('redeemedAt').val() === now)))",
+        ".validate": "newData.hasChildren(['count', 'lastCode', 'email', 'ts'])",
+        "count":    { ".validate": "newData.isNumber()" },
+        "lastCode": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 16" },
+        "email":    { ".validate": "newData.val() === auth.token.email" },
+        "ts":       { ".validate": "newData.val() === now" },
+        "$other":   { ".validate": false }
       }
     },
     "log": {

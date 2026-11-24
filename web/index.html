@@ -89,15 +89,7 @@ const auth = getAuth(app);
 const db = getDatabase(app);
 
 const CODE_ATTEMPT_LIMIT = 5;
-const REQ_ATTEMPT_LIMIT = 5;
-async function getAttemptCount(uid, type) {
-  const snap = await get(ref(db, `/attempts/${uid}/${type}`)).catch(() => null);
-  return snap?.val() ?? 0;
-}
-async function incrementAttempt(uid, type, current) {
-  await set(ref(db, `/attempts/${uid}/${type}`), current + 1).catch(() => {});
-  return current + 1;
-}
+const LOCKED_MSG = 'Too many wrong codes. Ask the owner to unlock you.';
 
 let homeOnline = false;
 let allowed = false;
@@ -143,11 +135,6 @@ $('request').onclick = async () => {
   const user = auth.currentUser;
   $('request').disabled = true;
   try {
-    const reqCount = await getAttemptCount(user.uid, 'reqCount');
-    if (reqCount >= REQ_ATTEMPT_LIMIT) {
-      show('Too many access requests. Contact the owner to reset your account.', true);
-      return;
-    }
     await update(ref(db), {
       [`requests/${user.uid}`]: {
         name: (user.displayName || user.email || 'Web viewer').slice(0, 99),
@@ -157,8 +144,6 @@ $('request').onclick = async () => {
       },
       [`log/${push(ref(db, '/log')).key}`]: logEntry('requested', { detail: 'web' }),
     });
-    const next = await incrementAttempt(user.uid, 'reqCount', reqCount);
-    if (next >= REQ_ATTEMPT_LIMIT) logEvent('req-locked', { detail: 'web — locked after ' + REQ_ATTEMPT_LIMIT + ' requests' });
   } catch (e) {
     show(`Could not send the request: ${e.message}`, true);
   }
@@ -243,46 +228,50 @@ onAuthStateChanged(auth, (user) => {
   watchAccess(user);
 });
 
-// The grant write and ticket delete go in one atomic update: the rules accept the grant
-// only if the ticket disappears in the same write, which is what makes codes single-use
+// Each guess must first be recorded as a counted attempt: the rules only let you read or redeem
+// the code you just recorded, and stop recording after CODE_ATTEMPT_LIMIT until the owner resets.
+// The grant write and ticket delete go in one atomic update, which is what makes codes single-use.
 $('codeForm').onsubmit = async (e) => {
   e.preventDefault();
-  const user = auth.currentUser;
-  const code = $('code').value.toUpperCase().replace(/[^A-Z0-9]/g, '');
   const button = $('codeForm').querySelector('button');
   button.disabled = true;
   try {
-    const codeCount = await getAttemptCount(user.uid, 'codeCount');
-    if (codeCount >= CODE_ATTEMPT_LIMIT) {
-      show('Too many failed attempts. Contact the owner to reset your access.', true);
-      button.disabled = false;
-      return;
+    await redeem(auth.currentUser, $('code').value.toUpperCase().replace(/[^A-Z0-9]/g, ''));
+  } catch (err) {
+    show(err.message, true);
+  }
+  button.disabled = false;
+};
+
+async function redeem(user, code) {
+  if (code.length !== 8) throw new Error('Enter the 8-character code');
+  const prev = (await get(ref(db, `/attempts/${user.uid}`)).catch(() => null))?.val();
+  const count = (prev?.count ?? 0) + 1;
+  if (count > CODE_ATTEMPT_LIMIT) throw new Error(LOCKED_MSG);
+  try {
+    await set(ref(db, `/attempts/${user.uid}`), { count, lastCode: code, email: user.email, ts: serverTimestamp() });
+  } catch {
+    throw new Error(LOCKED_MSG);
+  }
+  const ticket = (await get(ref(db, `/tickets/${code}`)).catch(() => null))?.val();
+  if (!ticket || ticket.expires < Date.now() || ticket.uid !== user.uid) {
+    if (count === CODE_ATTEMPT_LIMIT) {
+      logEvent('code-locked', { detail: `${CODE_ATTEMPT_LIMIT} wrong codes, web` });
+      throw new Error(LOCKED_MSG);
     }
-    const ticket = (await get(ref(db, `/tickets/${code}`)).catch(() => null))?.val();
-    if (!ticket || ticket.expires < Date.now()) {
-      const next = await incrementAttempt(user.uid, 'codeCount', codeCount);
-      if (next >= CODE_ATTEMPT_LIMIT) logEvent('code-locked', { detail: 'web — locked after ' + CODE_ATTEMPT_LIMIT + ' failed attempts' });
-      const remaining = CODE_ATTEMPT_LIMIT - next;
-      show(remaining <= 0
-        ? 'Too many failed attempts. Contact the owner to reset your access.'
-        : `Invalid or expired code (${remaining} attempt${remaining === 1 ? '' : 's'} left)`, true);
-      button.disabled = false;
-      return;
-    }
-    if (ticket.uid !== user.uid) {
-      const next = await incrementAttempt(user.uid, 'codeCount', codeCount);
-      if (next >= CODE_ATTEMPT_LIMIT) logEvent('code-locked', { detail: 'web — locked after ' + CODE_ATTEMPT_LIMIT + ' failed attempts' });
-      show('This code was issued for a different account', true);
-      button.disabled = false;
-      return;
-    }
-    const days = ticket.accessMs / 86400000;
-    const duration = days >= 1 ? `${Math.round(days)}d` : `${Math.round(ticket.accessMs / 3600000)}h`;
+    const left = CODE_ATTEMPT_LIMIT - count;
+    const reason = ticket && ticket.uid !== user.uid ? 'This code was issued for a different account' : 'Invalid or expired code';
+    throw new Error(`${reason} (${left} ${left === 1 ? 'try' : 'tries'} left)`);
+  }
+  const days = ticket.accessMs / 86400000;
+  const duration = days >= 1 ? `${Math.round(days)}d` : `${Math.round(ticket.accessMs / 3600000)}h`;
+  try {
     await update(ref(db), {
       [`log/${push(ref(db, '/log')).key}`]: logEntry('redeemed', {
         detail: `code ${code.slice(0, 4)}-${code.slice(4)}, ${duration}, web`,
       }),
       [`requests/${user.uid}`]: null,
+      [`attempts/${user.uid}`]: null,
       [`grants/${user.uid}`]: {
         code,
         redeemedAt: serverTimestamp(),
@@ -292,13 +281,12 @@ $('codeForm').onsubmit = async (e) => {
       },
       [`tickets/${code}`]: null,
     });
-    $('code').value = '';
-    await watchAccess(user);
-  } catch (err) {
-    show('Code not accepted. Ask the owner for a new one.', true);
+  } catch {
+    throw new Error('Code not accepted. Ask the owner for a new one.');
   }
-  button.disabled = false;
-};
+  $('code').value = '';
+  await watchAccess(user);
+}
 
 $('signin').onclick = async () => {
   $('signin').disabled = true;
