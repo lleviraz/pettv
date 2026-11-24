@@ -20,6 +20,11 @@
   button:disabled { opacity: .5; cursor: default; }
   button.link { background: none; color: #888; font-size: 13px; font-weight: 400; padding: 8px; }
   .muted { color: #888; font-size: 15px; }
+  #codeForm { display: flex; flex-direction: column; gap: 12px; width: 100%; }
+  #code {
+    font: inherit; font-size: 24px; letter-spacing: 4px; text-align: center; text-transform: uppercase;
+    padding: 14px; border: 1px solid #ccc; border-radius: 12px; width: 100%;
+  }
   .err { color: #c0392b; font-size: 15px; font-weight: 600; }
   [hidden] { display: none !important; }
 
@@ -37,6 +42,12 @@
   <h1>PetTV</h1>
   <p class="muted" id="msg">Loading…</p>
   <button id="signin" hidden>Sign in with Google</button>
+  <button id="request" hidden>Request access</button>
+  <form id="codeForm" hidden>
+    <input id="code" placeholder="XXXX-XXXX" maxlength="12" autocomplete="one-time-code"
+           autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Access code">
+    <button type="submit">Unlock</button>
+  </form>
   <button id="watch" hidden>▶&nbsp; Watch Live</button>
   <button class="link" id="signout" hidden>Sign out</button>
 </div>
@@ -52,7 +63,8 @@
 const SDK = 'https://www.gstatic.com/firebasejs/13.4.0';
 const { initializeApp } = await import(`${SDK}/firebase-app.js`);
 const { getAuth, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut } = await import(`${SDK}/firebase-auth.js`);
-const { getDatabase, ref, onValue, onChildAdded, set, push, remove, onDisconnect } = await import(`${SDK}/firebase-database.js`);
+const { getDatabase, ref, onValue, onChildAdded, set, push, remove, onDisconnect, get, update, serverTimestamp } =
+  await import(`${SDK}/firebase-database.js`);
 
 const $ = (id) => document.getElementById(id);
 const ICE = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }];
@@ -83,33 +95,156 @@ function refreshButtons() {
   $('signin').hidden = !!user;
   $('signout').hidden = !user;
   $('watch').hidden = !(user && allowed && homeOnline);
+  $('codeForm').hidden = !(user && needsCode);
+  $('request').hidden = !(user && needsCode && !myRequest);
+}
+
+let myRequest = null;
+
+function fmtTime(ms) {
+  return new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function showNeedsCode(user) {
+  show(myRequest
+    ? `Request sent ${fmtTime(myRequest.ts)}. Enter the code the owner sends you.`
+    : `${user.email} doesn't have access. Request it, then enter the code the owner sends you.`);
+}
+
+// The rules require email to equal the verified Google email, so the owner sees the real address
+$('request').onclick = async () => {
+  const user = auth.currentUser;
+  $('request').disabled = true;
+  try {
+    await update(ref(db), {
+      [`requests/${user.uid}`]: {
+        name: (user.displayName || user.email || 'Web viewer').slice(0, 99),
+        email: user.email,
+        type: 'viewer',
+        ts: serverTimestamp(),
+      },
+      [`log/${push(ref(db, '/log')).key}`]: logEntry('requested', { detail: 'web' }),
+    });
+    myRequest = (await get(ref(db, `/requests/${user.uid}`))).val();
+    showNeedsCode(user);
+  } catch (e) {
+    show(`Could not send the request: ${e.message}`, true);
+  }
+  $('request').disabled = false;
+  refreshButtons();
+};
+
+function logEntry(event, extra = {}) {
+  const user = auth.currentUser;
+  return { uid: user.uid, email: user.email ?? 'unknown', event, ts: serverTimestamp(), ...extra };
+}
+
+function logEvent(event, extra) {
+  return push(ref(db, '/log'), logEntry(event, extra)).catch(() => {});
 }
 
 let hbUnsub = null;
-onAuthStateChanged(auth, (user) => {
+let needsCode = false;
+let accessUntil = null;
+let expiryTimer = null;
+
+function signedInText(user) {
+  const until = accessUntil
+    ? ` · access until ${new Date(accessUntil).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
+    : '';
+  return `Signed in as ${user.email}${until}`;
+}
+
+async function loadGrant(user) {
+  clearTimeout(expiryTimer);
+  accessUntil = null;
+  const g = (await get(ref(db, `/grants/${user.uid}`)).catch(() => null))?.val();
+  if (g && g.redeemedAt + g.accessMs > Date.now()) {
+    accessUntil = g.redeemedAt + g.accessMs;
+    // Re-check when the code-based access runs out so the page drops back to the code prompt
+    expiryTimer = setTimeout(() => watchAccess(user), Math.min(accessUntil - Date.now() + 1000, 2 ** 31 - 1));
+  }
+}
+
+async function watchAccess(user) {
   hbUnsub?.();
   hbUnsub = null;
   allowed = false;
+  needsCode = false;
   homeOnline = false;
-  if (!user) {
-    show('Sign in with a Google account that is on the PetTV whitelist.');
-    refreshButtons();
-    return;
-  }
   show(`Signed in as ${user.email}. Checking access…`);
+  await loadGrant(user);
   hbUnsub = onValue(ref(db, '/heartbeat'), (snap) => {
     allowed = true;
     homeOnline = snap.exists();
-    show(homeOnline ? `Signed in as ${user.email}` : 'Home phone is offline');
+    show(homeOnline ? signedInText(user) : 'Home phone is offline');
     refreshButtons();
-  }, (err) => {
-    show(err.code === 'PERMISSION_DENIED'
-      ? `${user.email} is not on the PetTV whitelist.`
-      : `Database error: ${err.message}`, true);
+  }, async (err) => {
+    if (err.code === 'PERMISSION_DENIED') {
+      await stopWatching();
+      if (!needsCode) logEvent('no-access', { detail: 'web' });
+      needsCode = true;
+      const req = (await get(ref(db, `/requests/${user.uid}`)).catch(() => null))?.val() ?? null;
+      myRequest = req?.type === 'viewer' ? req : null;
+      showNeedsCode(user);
+    } else {
+      show(`Database error: ${err.message}`, true);
+    }
     refreshButtons();
   });
   refreshButtons();
+}
+
+onAuthStateChanged(auth, (user) => {
+  if (!user) {
+    hbUnsub?.();
+    hbUnsub = null;
+    clearTimeout(expiryTimer);
+    allowed = false;
+    needsCode = false;
+    homeOnline = false;
+    show('Sign in with Google to watch.');
+    refreshButtons();
+    return;
+  }
+  watchAccess(user);
 });
+
+// The grant write and ticket delete go in one atomic update: the rules accept the grant
+// only if the ticket disappears in the same write, which is what makes codes single-use
+$('codeForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const user = auth.currentUser;
+  const code = $('code').value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const button = $('codeForm').querySelector('button');
+  button.disabled = true;
+  try {
+    const ticket = (await get(ref(db, `/tickets/${code}`)).catch(() => null))?.val();
+    if (!ticket || ticket.expires < Date.now()) throw new Error('Invalid or expired code');
+    if (ticket.uid !== user.uid) throw new Error('This code was issued for a different account');
+    const days = ticket.accessMs / 86400000;
+    const duration = days >= 1 ? `${Math.round(days)}d` : `${Math.round(ticket.accessMs / 3600000)}h`;
+    await update(ref(db), {
+      [`log/${push(ref(db, '/log')).key}`]: logEntry('redeemed', {
+        detail: `code ${code.slice(0, 4)}-${code.slice(4)}, ${duration}, web`,
+      }),
+      [`requests/${user.uid}`]: null,
+      [`grants/${user.uid}`]: {
+        code,
+        redeemedAt: serverTimestamp(),
+        accessMs: ticket.accessMs,
+        name: (user.displayName || user.email || 'Web viewer').slice(0, 99),
+      },
+      [`tickets/${code}`]: null,
+    });
+    $('code').value = '';
+    await watchAccess(user);
+  } catch (err) {
+    const known = ['Invalid or expired code', 'This code was issued for a different account'];
+    show(known.includes(err.message) ? err.message : 'Code not accepted. Ask the owner for a new one.', true);
+  }
+  button.disabled = false;
+};
 
 $('signin').onclick = async () => {
   $('signin').disabled = true;

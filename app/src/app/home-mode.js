@@ -24,7 +24,36 @@ video{width:100vw;height:100vh;object-fit:cover;transform:scaleX(-1)}
 <script>
 ${signalingScript(idToken, uid)}
 const viewers={};
+const grants={};
+const blocked={};
 let stream;
+
+function grantValid(vid){
+  const g=grants[vid];
+  return !!g&&g.redeemedAt+g.accessMs>Date.now();
+}
+
+function logEv(event,vid,name){
+  dbw('/log.json','POST',{uid:UID,event,subject:vid,detail:name,ts:{'.sv':'timestamp'}}).catch(()=>{});
+}
+
+// Rules only block new requests; a stream already flowing must be cut here when access ends
+function enforceAccess(){
+  for(const[vid,v]of Object.entries(viewers)){
+    if(blocked[vid]||(v.viaGrant&&!grantValid(vid))){
+      closeViewer(vid);
+      dbw('/sessions/'+vid+'.json','DELETE').catch(()=>{});
+    }
+  }
+}
+
+function mirror(target,type,path,data){
+  if(type==='put'&&path==='/')Object.keys(target).forEach(k=>delete target[k]);
+  for(const[k,val]of kids(type,path,data)){
+    if(val)target[k]=val;else delete target[k];
+  }
+  enforceAccess();
+}
 
 function updateCount(){
   const names=Object.values(viewers).filter(v=>v.pc.connectionState==='connected').map(v=>v.name);
@@ -37,6 +66,7 @@ function closeViewer(vid){
   const v=viewers[vid];
   if(!v)return;
   delete viewers[vid];
+  if(v.started)logEv('watch-stop',vid,v.name);
   v.listeners.forEach(l=>l.close());
   v.pc.close();
   updateCount();
@@ -56,6 +86,10 @@ async function start(){
   st('Online');
   post({t:'ready'});
 
+  sse('/grants.json',(type,path,data)=>mirror(grants,type,path,data));
+  sse('/blocked.json',(type,path,data)=>mirror(blocked,type,path,data));
+  setInterval(enforceAccess,15000);
+
   sse('/sessions.json',(type,path,data)=>{
     for(const[vid,s]of kids(type,path,data)){
       if(!s){closeViewer(vid);continue;}
@@ -70,7 +104,8 @@ async function start(){
 
 async function handleViewer(vid,reqId,name){
   const pc=new RTCPeerConnection({iceServers:ICE});
-  const v={pc,reqId,name:String(name||'Unknown viewer').slice(0,60),listeners:[]};
+  // Whitelisted viewers have no valid grant and are never cut off by enforceGrants
+  const v={pc,reqId,name:String(name||'Unknown viewer').slice(0,60),viaGrant:grantValid(vid),listeners:[]};
   viewers[vid]=v;
   const live=()=>viewers[vid]===v;
   stream.getTracks().forEach(t=>pc.addTrack(t,stream));
@@ -80,6 +115,7 @@ async function handleViewer(vid,reqId,name){
   };
   pc.onconnectionstatechange=()=>{
     const s=pc.connectionState;
+    if(s==='connected'&&!v.started){v.started=true;logEv('watch-start',vid,v.name);}
     if((s==='failed'||s==='closed')&&live())closeViewer(vid);
     else updateCount();
   };

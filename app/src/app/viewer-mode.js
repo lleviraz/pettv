@@ -94,7 +94,11 @@ export default function ViewerModeScreen() {
   }
 
   useEffect(() => {
-    const hbUnsub = onValue(ref(db, '/heartbeat'), (snap) => setHomeOnline(snap.exists()));
+    // Permission denied here means access expired or was revoked; send them back to enter a new code
+    const hbUnsub = onValue(ref(db, '/heartbeat'), (snap) => setHomeOnline(snap.exists()), async () => {
+      await AsyncStorage.removeItem('role');
+      router.replace('/role-picker');
+    });
     return () => {
       hbUnsub();
       endSession();

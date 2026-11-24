@@ -37,7 +37,8 @@ export default function SignInScreen() {
       await signInWithCredential(auth, credential);
       // onAuthStateChanged above will redirect
     } catch (e) {
-      setError('Sign-in failed. Please try again.');
+      console.warn('Sign-in failed:', e?.code, e?.message);
+      setError(`Sign-in failed (${e?.code ?? 'unknown'}): ${e?.message ?? String(e)}`);
       setSigningIn(false);
     }
   }
