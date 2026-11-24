@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, AppState } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, AppState, Platform } from 'react-native';
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
@@ -8,7 +8,9 @@ import { auth, db } from '../config';
 import { signalingScript, useSignalingToken } from '../webview-signaling';
 import { confirmWithDevice } from '../access';
 
-function buildViewerHtml(idToken, myUid, myName, myEmail) {
+const DEVICE_NAME = `Android app (${Platform.constants?.Model ?? 'phone'})`.slice(0, 59);
+
+function buildViewerHtml(idToken, myUid, myName, myEmail, myDevice) {
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -48,14 +50,24 @@ applyRotation();
 const REQ=Date.now()+'-'+Math.random().toString(36).slice(2,8);
 const NAME=${JSON.stringify(myName).replace(/</g, '\\u003c')};
 const EMAIL=${JSON.stringify(myEmail).replace(/</g, '\\u003c')};
+const DEVICE=${JSON.stringify(myDevice).replace(/</g, '\\u003c')};
 let pc=null;
+let superseded=false;
 
-function lost(msg){st(msg);post({t:'lost',m:msg});}
+function lost(msg){if(!superseded){st(msg);post({t:'lost',m:msg});}}
 
 async function connect(){
   st('Requesting stream...');
-  await dbw('/sessions/'+UID+'.json','PUT',{request:REQ,name:NAME,email:EMAIL});
+  await dbw('/sessions/'+UID+'.json','PUT',{request:REQ,name:NAME,email:EMAIL,device:DEVICE});
   st('Waiting for home phone...');
+  // Another device of the same account replaced our request; stop instead of hanging on "Reconnecting"
+  const reqListener=sse('/sessions/'+UID+'/request.json',(type,path,req)=>{
+    if(typeof req!=='string'||req===REQ||superseded)return;
+    superseded=true;
+    reqListener.close();
+    if(pc)pc.close();
+    post({t:'superseded'});
+  });
   const offerListener=sse('/sessions/'+UID+'/offer.json',(type,path,sdp)=>{
     if(typeof sdp!=='string'||pc)return;
     offerListener.close();
@@ -150,7 +162,10 @@ export default function ViewerModeScreen() {
     return () => sub.remove();
   }, []);
 
+  // Once another device took over, the session belongs to it and must not be deleted from here
+  const supersededRef = useRef(false);
   function endSession() {
+    if (supersededRef.current) return Promise.resolve();
     return remove(ref(db, `/sessions/${myUid}`)).catch(() => {});
   }
 
@@ -168,6 +183,7 @@ export default function ViewerModeScreen() {
 
   async function watch() {
     setStatusMsg('');
+    supersededRef.current = false;
     await endSession();
     setAttempt(a => a + 1);
     setPhase('connecting');
@@ -191,6 +207,7 @@ export default function ViewerModeScreen() {
       if (msg.t === 's') setStatusMsg(msg.m);
       else if (msg.t === 'connected') setPhase('connected');
       else if (msg.t === 'lost') { setPhase('error'); setStatusMsg(msg.m); endSession(); }
+      else if (msg.t === 'superseded') { supersededRef.current = true; setPhase('superseded'); }
       else if (msg.t === 'needToken') pushFreshToken();
     } catch {}
   }
@@ -217,7 +234,7 @@ export default function ViewerModeScreen() {
         <WebView
           key={attempt}
           ref={webRef}
-          source={{ html: buildViewerHtml(token, myUid, auth.currentUser?.displayName || auth.currentUser?.email || 'Android viewer', auth.currentUser?.email ?? ''), baseUrl: 'https://localhost' }}
+          source={{ html: buildViewerHtml(token, myUid, auth.currentUser?.displayName || auth.currentUser?.email || 'Android viewer', auth.currentUser?.email ?? '', DEVICE_NAME), baseUrl: 'https://localhost' }}
           style={styles.video}
           javaScriptEnabled={true}
           domStorageEnabled={true}
@@ -250,6 +267,15 @@ export default function ViewerModeScreen() {
         <TouchableOpacity style={styles.connectBtn} onPress={watch}>
           <Text style={styles.connectText}>▶  Watch Live</Text>
         </TouchableOpacity>
+      )}
+
+      {phase === 'superseded' && (
+        <>
+          <Text style={styles.statusText}>Now watching on another device</Text>
+          <TouchableOpacity style={styles.connectBtn} onPress={watch}>
+            <Text style={styles.connectText}>Watch here</Text>
+          </TouchableOpacity>
+        </>
       )}
 
       {phase === 'error' && (
@@ -295,6 +321,7 @@ const styles = StyleSheet.create({
   emoji: { fontSize: 48 },
   title: { fontSize: 32, fontWeight: '700', color: '#1a1a1a' },
   offlineText: { fontSize: 15, color: '#888' },
+  statusText: { fontSize: 15, color: '#555', textAlign: 'center' },
   connectBtn: {
     paddingHorizontal: 36,
     paddingVertical: 16,

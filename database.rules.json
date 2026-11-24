@@ -31,7 +31,8 @@
       "$vid": {
         ".read":  "auth != null && auth.uid === $vid && !root.child('blocked').child(auth.uid).exists() && (root.child('whitelist').child(auth.uid).exists() || root.child('grants').child(auth.uid).child('redeemedAt').val() + root.child('grants').child(auth.uid).child('accessMs').val() > now)",
         ".write": "auth != null && auth.uid === $vid && !root.child('blocked').child(auth.uid).exists() && (root.child('whitelist').child(auth.uid).exists() || root.child('grants').child(auth.uid).child('redeemedAt').val() + root.child('grants').child(auth.uid).child('accessMs').val() > now)",
-        "email": { ".validate": "newData.val() === auth.token.email" }
+        "email": { ".validate": "newData.val() === auth.token.email" },
+        "device": { ".validate": "newData.isString() && newData.val().length < 60" }
       }
     },
     "requests": {

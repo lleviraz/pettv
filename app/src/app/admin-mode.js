@@ -223,7 +223,7 @@ export default function AdminScreen() {
     .filter(t => t.expires > now);
   const watching = Object.entries(sessions)
     .filter(([, s]) => s && s.request)
-    .map(([uid, s]) => ({ uid, name: s.name || uid, email: s.email }));
+    .map(([uid, s]) => ({ uid, name: s.name || uid, email: s.email, device: s.device }));
   const blockedList = Object.entries(blocked).map(([uid, b]) => ({ uid, ...b }));
   const pending = Object.entries(requests)
     .filter(([uid]) => !blocked[uid])
@@ -242,7 +242,9 @@ export default function AdminScreen() {
         <View key={w.uid} style={styles.row}>
           <View style={styles.rowText}>
             <Text style={styles.rowTitle} numberOfLines={1}>{w.name}</Text>
-            {!!w.email && <Text style={styles.rowSub} numberOfLines={1}>{w.email}</Text>}
+            {!!(w.email || w.device) && (
+              <Text style={styles.rowSub} numberOfLines={2}>{[w.email, w.device].filter(Boolean).join(' · ')}</Text>
+            )}
           </View>
           <TouchableOpacity style={styles.dangerBtn} onPress={() => block(w)}>
             <Text style={styles.dangerText}>Block</Text>

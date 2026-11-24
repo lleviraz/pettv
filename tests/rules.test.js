@@ -135,6 +135,13 @@ describe('whitelisted family member', () => {
     await assertSucceeds(as(FAMILY).ref(`sessions/${FAMILY}/offer`).get());
   });
 
+  test('can label its session with a device name of sane length', async () => {
+    const base = { request: 'r', name: 'F', email: emailOf(FAMILY) };
+    await assertSucceeds(as(FAMILY).ref(`sessions/${FAMILY}`).set({ ...base, device: 'iPhone Safari' }));
+    await assertFails(as(FAMILY).ref(`sessions/${FAMILY}`).set({ ...base, device: 'x'.repeat(80) }));
+    await assertFails(as(FAMILY).ref(`sessions/${FAMILY}`).set({ ...base, device: 42 }));
+  });
+
   test('cannot fake its email, touch other sessions, or read all sessions', async () => {
     await assertFails(as(FAMILY).ref(`sessions/${FAMILY}`).set({ request: 'r', name: 'F', email: 'boss@example.com' }));
     await assertFails(as(FAMILY).ref(`sessions/${GUEST}`).set({ request: 'r' }));

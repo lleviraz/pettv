@@ -127,17 +127,19 @@ async function start(){
       // Each viewer attempt writes a fresh request id and no offer; anything else is our own write echoing back
       if(s.request&&!s.offer&&viewers[vid]?.reqId!==s.request){
         closeViewer(vid);
-        handleViewer(vid,s.request,s.name,s.email).catch(e=>st('Viewer err: '+e.message));
+        handleViewer(vid,s.request,s.name,s.email,s.device).catch(e=>st('Viewer err: '+e.message));
       }
     }
   });
 }
 
-async function handleViewer(vid,reqId,name,email){
+async function handleViewer(vid,reqId,name,email,device){
   const pc=new RTCPeerConnection({iceServers:ICE});
-  const label=String(name||'Unknown viewer').slice(0,60)+(email?' ('+String(email).slice(0,100)+')':'');
+  const shortName=String(name||'Unknown viewer').slice(0,60);
+  const dev=device?' · '+String(device).slice(0,59):'';
+  const label=(shortName+(email?' ('+String(email).slice(0,80)+')':'')+dev).slice(0,199);
   // Whitelisted viewers have no valid grant and are never cut off by enforceAccess
-  const v={pc,reqId,name:String(name||'Unknown viewer').slice(0,60),label,viaGrant:grantValid(vid),listeners:[]};
+  const v={pc,reqId,name:shortName+dev,label,viaGrant:grantValid(vid),listeners:[]};
   viewers[vid]=v;
   const live=()=>viewers[vid]===v;
   let s;
