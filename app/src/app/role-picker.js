@@ -4,9 +4,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
 import { signOut } from 'firebase/auth';
 import { GoogleSignin } from '@react-native-google-signin/google-signin';
-import { auth } from '../config';
+import { ref, onValue } from 'firebase/database';
+import { auth, db } from '../config';
 import {
-  hasViewerAccess, redeemTicket, isAdmin, logEvent, getMyRequest, requestAccess, isHomeAccount,
+  hasViewerAccess, redeemTicket, isAdmin, logEvent, requestAccess, isHomeAccount,
 } from '../access';
 
 const KNOWN_ERRORS = ['Invalid or expired code', 'This code was issued for a different account'];
@@ -28,6 +29,12 @@ export default function RolePickerScreen() {
     isAdmin().then(setAdmin);
   }, []);
 
+  // Live, so the request button re-enables as soon as the admin dismisses or answers the request
+  useEffect(() => {
+    if (!needCode && !needHome) return;
+    return onValue(ref(db, `/requests/${auth.currentUser.uid}`), s => setMyRequest(s.val()), () => setMyRequest(null));
+  }, [needCode, needHome]);
+
   async function enter(role) {
     await AsyncStorage.setItem('role', role);
     router.replace(role === 'home' ? '/home-mode' : '/viewer-mode');
@@ -38,7 +45,6 @@ export default function RolePickerScreen() {
     setPicking(true);
     try {
       if (role === 'home' && !(await isHomeAccount())) {
-        setMyRequest(await getMyRequest());
         setNeedHome(true);
         setPicking(false);
         return;
@@ -47,7 +53,6 @@ export default function RolePickerScreen() {
         const user = auth.currentUser;
         if (!(await hasViewerAccess(user.uid))) {
           logEvent('no-access', { detail: 'Android app' });
-          setMyRequest(await getMyRequest());
           setNeedCode(true);
           setPicking(false);
           return;
@@ -85,28 +90,34 @@ export default function RolePickerScreen() {
     setPicking(true);
     try {
       await requestAccess(type);
-      setMyRequest(await getMyRequest());
     } catch (e) {
       setCodeError('Could not send the request: ' + (e?.message ?? String(e)));
     }
     setPicking(false);
   }
 
+  // One request per account at a time (the rules refuse a second one), so any pending request dims the button
+  const pending = !!myRequest;
+  const requestButton = (type, label) => (
+    <TouchableOpacity
+      style={[styles.primaryBtn, (pending || picking) && styles.dimmedBtn]}
+      onPress={() => sendRequest(type)}
+      disabled={pending || picking}
+    >
+      <Text style={styles.primaryText}>{pending ? 'Request sent — waiting for the owner' : label}</Text>
+    </TouchableOpacity>
+  );
+
   if (needHome) {
-    const homeRequested = myRequest?.type === 'home';
     return (
       <View style={styles.container}>
         <Text style={styles.title}>Not the home phone</Text>
         <Text style={styles.subtitle}>
-          {homeRequested
+          {myRequest?.type === 'home'
             ? `Request sent ${fmtTime(myRequest.ts)}. Once the owner approves, pick "Home phone" again.`
             : `${auth.currentUser?.email} isn't the registered home account. The owner must approve it first.`}
         </Text>
-        {!homeRequested && (
-          <TouchableOpacity style={styles.primaryBtn} onPress={() => sendRequest('home')} disabled={picking}>
-            <Text style={styles.primaryText}>Request to be the home phone</Text>
-          </TouchableOpacity>
-        )}
+        {requestButton('home', 'Request to be the home phone')}
         {!!codeError && <Text style={styles.error}>{codeError}</Text>}
         <TouchableOpacity onPress={() => { setNeedHome(false); setCodeError(null); }}>
           <Text style={styles.link}>Back</Text>
@@ -122,20 +133,12 @@ export default function RolePickerScreen() {
     return (
       <View style={styles.container}>
         <Text style={styles.title}>Access needed</Text>
-        {myRequest?.type === 'viewer' ? (
-          <Text style={styles.subtitle}>
-            Request sent {fmtTime(myRequest.ts)}. The owner will send you a code. Enter it below.
-          </Text>
-        ) : (
-          <>
-            <Text style={styles.subtitle}>
-              {auth.currentUser?.email} doesn't have access. Request it, then enter the code the owner sends you.
-            </Text>
-            <TouchableOpacity style={styles.primaryBtn} onPress={() => sendRequest('viewer')} disabled={picking}>
-              <Text style={styles.primaryText}>Request access</Text>
-            </TouchableOpacity>
-          </>
-        )}
+        <Text style={styles.subtitle}>
+          {myRequest?.type === 'viewer'
+            ? `Request sent ${fmtTime(myRequest.ts)}. The owner will send you a code. Enter it below.`
+            : `${auth.currentUser?.email} doesn't have access. Request it, then enter the code the owner sends you.`}
+        </Text>
+        {requestButton('viewer', 'Request access')}
         <TextInput
           style={styles.codeInput}
           value={code}
@@ -226,6 +229,7 @@ const styles = StyleSheet.create({
   },
   error: { color: '#c0392b', fontSize: 14, textAlign: 'center' },
   primaryBtn: { paddingHorizontal: 36, paddingVertical: 14, borderRadius: 12, backgroundColor: '#27ae60' },
+  dimmedBtn: { opacity: 0.45 },
   primaryText: { color: '#fff', fontSize: 16, fontWeight: '700' },
   link: { color: '#4A90E2', fontSize: 16, fontWeight: '600' },
   account: { position: 'absolute', bottom: 36, left: 24, right: 24, alignItems: 'center', gap: 6 },

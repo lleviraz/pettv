@@ -66,7 +66,7 @@ function closeViewer(vid){
   const v=viewers[vid];
   if(!v)return;
   delete viewers[vid];
-  if(v.started)logEv('watch-stop',vid,v.name);
+  if(v.started)logEv('watch-stop',vid,v.label);
   v.listeners.forEach(l=>l.close());
   v.pc.close();
   updateCount();
@@ -96,16 +96,17 @@ async function start(){
       // Each viewer attempt writes a fresh request id and no offer; anything else is our own write echoing back
       if(s.request&&!s.offer&&viewers[vid]?.reqId!==s.request){
         closeViewer(vid);
-        handleViewer(vid,s.request,s.name).catch(e=>st('Viewer err: '+e.message));
+        handleViewer(vid,s.request,s.name,s.email).catch(e=>st('Viewer err: '+e.message));
       }
     }
   });
 }
 
-async function handleViewer(vid,reqId,name){
+async function handleViewer(vid,reqId,name,email){
   const pc=new RTCPeerConnection({iceServers:ICE});
-  // Whitelisted viewers have no valid grant and are never cut off by enforceGrants
-  const v={pc,reqId,name:String(name||'Unknown viewer').slice(0,60),viaGrant:grantValid(vid),listeners:[]};
+  const label=String(name||'Unknown viewer').slice(0,60)+(email?' ('+String(email).slice(0,100)+')':'');
+  // Whitelisted viewers have no valid grant and are never cut off by enforceAccess
+  const v={pc,reqId,name:String(name||'Unknown viewer').slice(0,60),label,viaGrant:grantValid(vid),listeners:[]};
   viewers[vid]=v;
   const live=()=>viewers[vid]===v;
   stream.getTracks().forEach(t=>pc.addTrack(t,stream));
@@ -115,7 +116,7 @@ async function handleViewer(vid,reqId,name){
   };
   pc.onconnectionstatechange=()=>{
     const s=pc.connectionState;
-    if(s==='connected'&&!v.started){v.started=true;logEv('watch-start',vid,v.name);}
+    if(s==='connected'&&!v.started){v.started=true;logEv('watch-start',vid,v.label);}
     if((s==='failed'||s==='closed')&&live())closeViewer(vid);
     else updateCount();
   };

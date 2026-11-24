@@ -68,14 +68,10 @@ export async function redeemTicket(rawCode) {
       redeemedAt: serverTimestamp(),
       accessMs: ticket.accessMs,
       name: (user.displayName || user.email || 'Viewer').slice(0, 99),
+      email: user.email,
     },
     [`tickets/${code}`]: null,
   });
-}
-
-export async function getMyRequest() {
-  const snap = await get(ref(db, `/requests/${auth.currentUser.uid}`)).catch(() => null);
-  return snap?.val() ?? null;
 }
 
 // The rules require email to match the verified Google email, so the admin always sees the real address

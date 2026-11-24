@@ -7,7 +7,7 @@ import { ref, onValue, remove } from 'firebase/database';
 import { auth, db } from '../config';
 import { signalingScript, useSignalingToken } from '../webview-signaling';
 
-function buildViewerHtml(idToken, myUid, myName) {
+function buildViewerHtml(idToken, myUid, myName, myEmail) {
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -26,13 +26,14 @@ video{width:100vw;height:100vh;object-fit:cover}
 ${signalingScript(idToken, myUid)}
 const REQ=Date.now()+'-'+Math.random().toString(36).slice(2,8);
 const NAME=${JSON.stringify(myName).replace(/</g, '\\u003c')};
+const EMAIL=${JSON.stringify(myEmail).replace(/</g, '\\u003c')};
 let pc=null;
 
 function lost(msg){st(msg);post({t:'lost',m:msg});}
 
 async function connect(){
   st('Requesting stream...');
-  await dbw('/sessions/'+UID+'.json','PUT',{request:REQ,name:NAME});
+  await dbw('/sessions/'+UID+'.json','PUT',{request:REQ,name:NAME,email:EMAIL});
   st('Waiting for home phone...');
   const offerListener=sse('/sessions/'+UID+'/offer.json',(type,path,sdp)=>{
     if(typeof sdp!=='string'||pc)return;
@@ -140,7 +141,7 @@ export default function ViewerModeScreen() {
         <WebView
           key={attempt}
           ref={webRef}
-          source={{ html: buildViewerHtml(token, myUid, auth.currentUser?.displayName || auth.currentUser?.email || 'Android viewer'), baseUrl: 'https://localhost' }}
+          source={{ html: buildViewerHtml(token, myUid, auth.currentUser?.displayName || auth.currentUser?.email || 'Android viewer', auth.currentUser?.email ?? ''), baseUrl: 'https://localhost' }}
           style={styles.video}
           javaScriptEnabled={true}
           mediaPlaybackRequiresUserAction={false}

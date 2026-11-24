@@ -37,6 +37,10 @@ function describeActor(e) {
   return [e.email, e.detail].filter(Boolean).join(' · ');
 }
 
+function personLabel(p) {
+  return p.email ? `${p.name} (${p.email})` : p.name;
+}
+
 function fmtTime(ms) {
   return new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
@@ -97,11 +101,12 @@ export default function AdminScreen() {
       await set(ref(db, `/tickets/${code}`), {
         uid: req.uid,
         name: req.name,
+        email: req.email,
         expires: Date.now() + TICKET_REDEEM_WINDOW_MS,
         accessMs: duration.ms,
         createdAt: Date.now(),
       });
-      logEvent('code-created', { subject: req.uid, detail: `${req.name}: code ${formatCode(code)}, ${formatDuration(duration.ms)}` });
+      logEvent('code-created', { subject: req.uid, detail: `${req.name} (${req.email}): code ${formatCode(code)}, ${formatDuration(duration.ms)}` });
       setCodeFor(null);
       await Share.share({
         message:
@@ -132,36 +137,40 @@ export default function AdminScreen() {
     guarded('Dismiss request', () => remove(ref(db, `/requests/${uid}`)));
   }
 
-  function revoke(uid, name) {
-    Alert.alert('Revoke access', `Stop ${name} from watching? A live stream ends right away.`, [
+  function revoke(p) {
+    Alert.alert('Revoke access', `Stop ${personLabel(p)} from watching? A live stream ends right away.`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Revoke', style: 'destructive', onPress: () => guarded('Revoke access', async () => {
-          await remove(ref(db, `/grants/${uid}`));
-          logEvent('revoked', { subject: uid, detail: name });
+          await remove(ref(db, `/grants/${p.uid}`));
+          logEvent('revoked', { subject: p.uid, detail: personLabel(p).slice(0, 199) });
         }),
       },
     ]);
   }
 
   // Blocking overrides the whitelist and codes; the home phone cuts a live stream as soon as this lands
-  function block(uid, name) {
-    Alert.alert('Block viewer', `Block ${name}? Their stream ends now and they can't watch or redeem codes until unblocked.`, [
+  function block(p) {
+    Alert.alert('Block viewer', `Block ${personLabel(p)}? Their stream ends now and they can't watch or redeem codes until unblocked.`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Block', style: 'destructive', onPress: () => guarded('Block viewer', async () => {
-          await set(ref(db, `/blocked/${uid}`), { name: String(name).slice(0, 199), ts: serverTimestamp() });
-          await remove(ref(db, `/grants/${uid}`));
-          logEvent('blocked', { subject: uid, detail: String(name).slice(0, 199) });
+          await set(ref(db, `/blocked/${p.uid}`), {
+            name: String(p.name).slice(0, 199),
+            ...(p.email ? { email: p.email } : {}),
+            ts: serverTimestamp(),
+          });
+          await remove(ref(db, `/grants/${p.uid}`));
+          logEvent('blocked', { subject: p.uid, detail: personLabel(p).slice(0, 199) });
         }),
       },
     ]);
   }
 
-  function unblock(uid, name) {
+  function unblock(p) {
     guarded('Unblock viewer', async () => {
-      await remove(ref(db, `/blocked/${uid}`));
-      logEvent('unblocked', { subject: uid, detail: name });
+      await remove(ref(db, `/blocked/${p.uid}`));
+      logEvent('unblocked', { subject: p.uid, detail: personLabel(p).slice(0, 199) });
     });
   }
 
@@ -208,7 +217,7 @@ export default function AdminScreen() {
     .filter(t => t.expires > now);
   const watching = Object.entries(sessions)
     .filter(([, s]) => s && s.request)
-    .map(([uid, s]) => ({ uid, name: s.name || uid }));
+    .map(([uid, s]) => ({ uid, name: s.name || uid, email: s.email }));
   const blockedList = Object.entries(blocked).map(([uid, b]) => ({ uid, ...b }));
   const pending = Object.entries(requests)
     .filter(([uid]) => !blocked[uid])
@@ -227,8 +236,9 @@ export default function AdminScreen() {
         <View key={w.uid} style={styles.row}>
           <View style={styles.rowText}>
             <Text style={styles.rowTitle} numberOfLines={1}>{w.name}</Text>
+            {!!w.email && <Text style={styles.rowSub} numberOfLines={1}>{w.email}</Text>}
           </View>
-          <TouchableOpacity style={styles.dangerBtn} onPress={() => block(w.uid, w.name)}>
+          <TouchableOpacity style={styles.dangerBtn} onPress={() => block(w)}>
             <Text style={styles.dangerText}>Block</Text>
           </TouchableOpacity>
         </View>
@@ -252,7 +262,7 @@ export default function AdminScreen() {
               <TouchableOpacity style={styles.neutralBtn} onPress={() => dismissRequest(r.uid)}>
                 <Text style={styles.neutralText}>Dismiss</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.dangerBtn} onPress={() => block(r.uid, r.name)}>
+              <TouchableOpacity style={styles.dangerBtn} onPress={() => block(r)}>
                 <Text style={styles.dangerText}>Block</Text>
               </TouchableOpacity>
             </View>
@@ -275,7 +285,7 @@ export default function AdminScreen() {
               <TouchableOpacity style={styles.neutralBtn} onPress={() => dismissRequest(r.uid)}>
                 <Text style={styles.neutralText}>Dismiss</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.dangerBtn} onPress={() => block(r.uid, r.name)}>
+              <TouchableOpacity style={styles.dangerBtn} onPress={() => block(r)}>
                 <Text style={styles.dangerText}>Block</Text>
               </TouchableOpacity>
             </View>
@@ -289,12 +299,12 @@ export default function AdminScreen() {
         <View key={g.uid} style={styles.row}>
           <View style={styles.rowText}>
             <Text style={styles.rowTitle} numberOfLines={1}>{g.name}</Text>
-            <Text style={styles.rowSub}>until {fmtTime(g.until)}</Text>
+            <Text style={styles.rowSub} numberOfLines={1}>{g.email ? `${g.email} · ` : ''}until {fmtTime(g.until)}</Text>
           </View>
-          <TouchableOpacity style={styles.dangerBtn} onPress={() => revoke(g.uid, g.name)}>
+          <TouchableOpacity style={styles.dangerBtn} onPress={() => revoke(g)}>
             <Text style={styles.dangerText}>Revoke</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.dangerBtn} onPress={() => block(g.uid, g.name)}>
+          <TouchableOpacity style={styles.dangerBtn} onPress={() => block(g)}>
             <Text style={styles.dangerText}>Block</Text>
           </TouchableOpacity>
         </View>
@@ -306,7 +316,7 @@ export default function AdminScreen() {
         <View key={t.code} style={styles.row}>
           <View style={styles.rowText}>
             <Text style={styles.rowTitle}>{formatCode(t.code)}{t.name ? ` · ${t.name}` : ''}</Text>
-            <Text style={styles.rowSub}>use by {fmtTime(t.expires)}</Text>
+            <Text style={styles.rowSub} numberOfLines={1}>{t.email ? `${t.email} · ` : ''}use by {fmtTime(t.expires)}</Text>
           </View>
           <TouchableOpacity style={styles.dangerBtn} onPress={() => cancelTicket(t.code)}>
             <Text style={styles.dangerText}>Cancel</Text>
@@ -320,9 +330,9 @@ export default function AdminScreen() {
         <View key={b.uid} style={styles.row}>
           <View style={styles.rowText}>
             <Text style={styles.rowTitle} numberOfLines={1}>{b.name}</Text>
-            <Text style={styles.rowSub}>since {fmtTime(b.ts)}</Text>
+            <Text style={styles.rowSub} numberOfLines={1}>{b.email ? `${b.email} · ` : ''}since {fmtTime(b.ts)}</Text>
           </View>
-          <TouchableOpacity style={styles.neutralBtn} onPress={() => unblock(b.uid, b.name)}>
+          <TouchableOpacity style={styles.neutralBtn} onPress={() => unblock(b)}>
             <Text style={styles.neutralText}>Unblock</Text>
           </TouchableOpacity>
         </View>
