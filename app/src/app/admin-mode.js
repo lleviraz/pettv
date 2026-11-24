@@ -429,13 +429,17 @@ export default function AdminScreen() {
 
       <Text style={styles.section}>Activity (last 50)</Text>
       {activity.length === 0 && <Text style={styles.hint}>Nothing yet.</Text>}
-      {activity.map((e, i) => (
-        <View key={i} style={styles.logRow}>
-          <Text style={styles.logTime}>{fmtTime(e.ts)}</Text>
-          <Text style={styles.logEvent}>{EVENT_LABELS[e.event] ?? e.event}</Text>
-          <Text style={styles.logWho} numberOfLines={2}>{describeActor(e)}</Text>
-        </View>
-      ))}
+      {activity.length > 0 && (
+        <ScrollView style={styles.activityBox} nestedScrollEnabled>
+          {activity.map((e, i) => (
+            <View key={i} style={styles.logRow}>
+              <Text style={styles.logTime}>{fmtTime(e.ts)}</Text>
+              <Text style={styles.logEvent}>{EVENT_LABELS[e.event] ?? e.event}</Text>
+              <Text style={styles.logWho} numberOfLines={2}>{describeActor(e)}</Text>
+            </View>
+          ))}
+        </ScrollView>
+      )}
 
       <TouchableOpacity style={[styles.primaryBtn, styles.exportBtn]} onPress={exportLogs} disabled={exporting}>
         <Text style={styles.primaryText}>{exporting ? 'Collecting logs…' : '📄 Export logs'}</Text>
@@ -468,6 +472,7 @@ const styles = StyleSheet.create({
   dangerText: { color: '#c0392b', fontWeight: '600' },
   neutralBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 10, backgroundColor: '#E8F0FB' },
   neutralText: { color: '#4A90E2', fontWeight: '600' },
+  activityBox: { maxHeight: 420, borderRadius: 12, backgroundColor: '#F4F6F8', paddingHorizontal: 12 },
   logRow: { paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#ddd', gap: 2 },
   logTime: { fontSize: 12, color: '#999' },
   logEvent: { fontSize: 15, fontWeight: '600', color: '#1a1a1a' },

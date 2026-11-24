@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, StatusBar, Pressable, BackHandler, Alert, AppState, Platform } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, StatusBar, Pressable, BackHandler, Alert, AppState, Platform, ScrollView } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { useKeepAwake } from 'expo-keep-awake';
 import * as Brightness from 'expo-brightness';
@@ -405,12 +405,14 @@ export default function HomeModeScreen() {
         {viewers.length === 0 ? (
           <Text style={styles.noViewers}>No one is watching</Text>
         ) : (
-          viewers.map((name, i) => (
-            <View key={i} style={styles.viewerRow}>
-              <Text style={styles.viewerIcon}>👁</Text>
-              <Text style={styles.viewerName} numberOfLines={1}>{name}</Text>
-            </View>
-          ))
+          <ScrollView contentContainerStyle={styles.viewerList}>
+            {viewers.map((name, i) => (
+              <View key={i} style={styles.viewerRow}>
+                <Text style={styles.viewerIcon}>👁</Text>
+                <Text style={styles.viewerName} numberOfLines={1}>{name}</Text>
+              </View>
+            ))}
+          </ScrollView>
         )}
       </View>
 
@@ -488,6 +490,7 @@ const styles = StyleSheet.create({
   },
   viewersTitle: { color: '#aaa', fontSize: 13, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 },
   noViewers: { color: '#666', fontSize: 15 },
+  viewerList: { gap: 10 },
   viewerRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   viewerIcon: { fontSize: 15 },
   viewerName: { flex: 1, color: '#fff', fontSize: 16 },
