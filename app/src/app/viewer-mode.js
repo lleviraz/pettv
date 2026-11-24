@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, AppState } from 'react-native';
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
 import { ref, onValue, remove } from 'firebase/database';
 import { auth, db } from '../config';
 import { signalingScript, useSignalingToken } from '../webview-signaling';
+import { confirmWithDevice } from '../access';
 
 function buildViewerHtml(idToken, myUid, myName, myEmail) {
   return `<!DOCTYPE html>
@@ -88,7 +89,43 @@ export default function ViewerModeScreen() {
   const [attempt, setAttempt] = useState(0);
   const [homeOnline, setHomeOnline] = useState(null);
   const [statusMsg, setStatusMsg] = useState('');
+  const [locked, setLockedState] = useState(true);
+  const lockedRef = useRef(true);
+  const promptingRef = useRef(false);
   const myUid = auth.currentUser?.uid;
+
+  function setLocked(value) {
+    lockedRef.current = value;
+    setLockedState(value);
+  }
+
+  async function unlock() {
+    promptingRef.current = true;
+    let ok;
+    try {
+      ok = await confirmWithDevice('Unlock PetTV');
+    } catch {
+      ok = true; // no screen lock on this phone, so there is nothing to check against
+    }
+    promptingRef.current = false;
+    if (ok) setLocked(false);
+  }
+
+  // Lock whenever the app leaves the foreground so a picked-up phone can't open the stream
+  useEffect(() => {
+    unlock();
+    const sub = AppState.addEventListener('change', (state) => {
+      if (promptingRef.current) return; // the system lock prompt itself backgrounds the app on some phones
+      if (state === 'background') {
+        setLocked(true);
+        setPhase('idle');
+        endSession();
+      } else if (state === 'active' && lockedRef.current) {
+        unlock();
+      }
+    });
+    return () => sub.remove();
+  }, []);
 
   function endSession() {
     return remove(ref(db, `/sessions/${myUid}`)).catch(() => {});
@@ -133,6 +170,21 @@ export default function ViewerModeScreen() {
       else if (msg.t === 'lost') { setPhase('error'); setStatusMsg(msg.m); endSession(); }
       else if (msg.t === 'needToken') pushFreshToken();
     } catch {}
+  }
+
+  if (locked) {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.emoji}>🔒</Text>
+        <Text style={styles.title}>PetTV</Text>
+        <TouchableOpacity style={styles.connectBtn} onPress={unlock}>
+          <Text style={styles.connectText}>Unlock</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.switchBtn} onPress={switchRole}>
+          <Text style={styles.switchText}>Switch role</Text>
+        </TouchableOpacity>
+      </View>
+    );
   }
 
   if ((phase === 'connecting' || phase === 'connected') && token) {
