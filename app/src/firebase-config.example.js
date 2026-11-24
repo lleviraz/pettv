@@ -11,3 +11,6 @@ export const firebaseConfig = {
 };
 
 export const WEB_CLIENT_ID = 'YOUR_WEB_CLIENT_ID.apps.googleusercontent.com';
+
+// Must match webPath in web/firebase-config.js
+export const WEB_PATH = 'LONG_RANDOM_FOLDER_NAME';

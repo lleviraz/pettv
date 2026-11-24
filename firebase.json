@@ -4,12 +4,13 @@
     "predeploy": ["npm run test:rules"]
   },
   "hosting": {
-    "public": "web",
-    "ignore": ["**/.*", "**/*.example.js"],
+    "public": "dist-web",
+    "predeploy": ["node scripts/build-web.mjs"],
+    "ignore": ["**/.*"],
     "trailingSlash": true,
     "headers": [
       { "source": "**", "headers": [{ "key": "X-Robots-Tag", "value": "noindex, nofollow" }] },
-      { "source": "firebase-config.js", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] }
+      { "source": "**/firebase-config.js", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] }
     ]
   }
 }

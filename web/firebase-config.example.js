@@ -7,3 +7,7 @@ export const firebaseConfig = {
   projectId: 'YOUR_PROJECT_ID',
   appId: 'YOUR_WEB_APP_ID',
 };
+
+// Secret folder the viewer page is deployed under (the bare domain serves a 404).
+// Use a long random string, e.g. 32 lowercase letters and digits.
+export const webPath = 'LONG_RANDOM_FOLDER_NAME';

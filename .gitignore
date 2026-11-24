@@ -1,7 +1,8 @@
 node_modules/
 *-debug.log
 web/firebase-config.js
+dist-web/
 .firebase/
 *.jpg
 !app/assets/images/tako.jpg
-!web/*/tako.jpg
+!web/app/tako.jpg

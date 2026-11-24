@@ -81,7 +81,7 @@ function show(text, isError = false) {
 
 let firebaseConfig;
 try {
-  ({ firebaseConfig } = await import('../firebase-config.js'));
+  ({ firebaseConfig } = await import('./firebase-config.js'));
 } catch {
   show('Missing firebase-config.js — copy firebase-config.example.js and fill it in.', true);
   throw new Error('missing config');
