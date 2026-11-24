@@ -241,6 +241,7 @@ export default function HomeModeScreen() {
   }
 
   return (
+    <View style={styles.screen}>
     <View style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#111" hidden={dark && !peek} />
       <View style={styles.statusRow}>
@@ -282,6 +283,7 @@ export default function HomeModeScreen() {
       <TouchableOpacity style={styles.stopBtn} onPress={stop}>
         <Text style={styles.stopText}>Stop &amp; Switch Role</Text>
       </TouchableOpacity>
+    </View>
 
       {dark && (
         <Pressable style={styles.darkOverlay} onPress={() => setPeek(true)}>
@@ -348,8 +350,13 @@ const styles = StyleSheet.create({
   stopText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   darkBtn: { paddingVertical: 14, paddingHorizontal: 24, borderRadius: 12, backgroundColor: '#2c2c2e', alignItems: 'center' },
   darkText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  screen: { flex: 1, backgroundColor: '#111' },
   darkOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     backgroundColor: '#000',
     justifyContent: 'center',
     alignItems: 'center',
