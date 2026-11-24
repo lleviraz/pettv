@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, AppState, Platform } from 'react-native';
+import { View, Text, Image, StyleSheet, TouchableOpacity, ActivityIndicator, AppState, Platform } from 'react-native';
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
@@ -252,7 +252,7 @@ export default function ViewerModeScreen() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.emoji}>📱</Text>
+      <Image source={require('../../assets/images/tako.jpg')} style={styles.hero} />
       <Text style={styles.title}>PetTV</Text>
 
       {!!error && <Text style={styles.errorDetail}>Auth error: {error}</Text>}
@@ -319,6 +319,7 @@ const styles = StyleSheet.create({
     gap: 16,
   },
   emoji: { fontSize: 48 },
+  hero: { width: 180, height: 240, borderRadius: 24 },
   title: { fontSize: 32, fontWeight: '700', color: '#1a1a1a' },
   offlineText: { fontSize: 15, color: '#888' },
   statusText: { fontSize: 15, color: '#555', textAlign: 'center' },

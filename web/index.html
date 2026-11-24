@@ -12,7 +12,7 @@
   }
   .card { display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 24px 16px; text-align: center; max-width: 420px; }
   h1 { margin: 0; font-size: 32px; }
-  .emoji { font-size: 48px; }
+  .hero { width: 210px; height: 280px; border-radius: 28px; object-fit: cover; }
   button {
     font: inherit; font-size: 18px; font-weight: 700; border: 0; border-radius: 14px;
     padding: 16px 36px; color: #fff; background: #27ae60; cursor: pointer;
@@ -39,7 +39,7 @@
 </head>
 <body>
 <div class="card" id="home">
-  <div class="emoji">📱</div>
+  <img class="hero" src="tako.jpg" alt="Tako" width="210" height="280">
   <h1>PetTV</h1>
   <p class="muted" id="msg">Loading…</p>
   <button id="signin" hidden>Sign in with Google</button>

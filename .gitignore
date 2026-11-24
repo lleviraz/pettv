@@ -3,3 +3,5 @@ node_modules/
 web/firebase-config.js
 .firebase/
 *.jpg
+!app/assets/images/tako.jpg
+!web/tako.jpg

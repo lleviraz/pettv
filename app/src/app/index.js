@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, Text, Image, StyleSheet, ActivityIndicator } from 'react-native';
 import { router } from 'expo-router';
 import { onAuthStateChanged, GoogleAuthProvider, signInWithCredential } from 'firebase/auth';
 import { GoogleSignin, GoogleSigninButton } from '@react-native-google-signin/google-signin';
@@ -53,6 +53,7 @@ export default function SignInScreen() {
 
   return (
     <View style={styles.container}>
+      <Image source={require('../../assets/images/tako.jpg')} style={styles.hero} />
       <Text style={styles.title}>PetTV</Text>
       <Text style={styles.subtitle}>Watch your pet from anywhere</Text>
 
@@ -83,6 +84,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     paddingHorizontal: 24,
     gap: 16,
+  },
+  hero: {
+    width: 210,
+    height: 280,
+    borderRadius: 28,
   },
   title: {
     fontSize: 40,
