@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, StatusBar } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, StatusBar, Pressable, BackHandler, Alert } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { useKeepAwake } from 'expo-keep-awake';
+import * as Brightness from 'expo-brightness';
+import { confirmWithDevice } from '../access';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
 import { ref, remove, set, onValue, onDisconnect, serverTimestamp } from 'firebase/database';
@@ -162,6 +164,8 @@ export default function HomeModeScreen() {
   const [status, setStatus] = useState('Loading...');
   const [viewers, setViewers] = useState([]);
   const [cameraReady, setCameraReady] = useState(false);
+  const [dark, setDark] = useState(false);
+  const [peek, setPeek] = useState(false);
   const uid = auth.currentUser?.uid;
 
   // Presence: Firebase drops /heartbeat if this phone loses its connection; re-set it on every reconnect
@@ -185,7 +189,33 @@ export default function HomeModeScreen() {
     };
   }, [cameraReady]);
 
+  // Dark mode keeps the camera streaming under a black overlay; on AMOLED black pixels are off
+  useEffect(() => {
+    const dimmed = dark && !peek;
+    (dimmed ? Brightness.setBrightnessAsync(0) : Brightness.restoreSystemBrightnessAsync()).catch(() => {});
+  }, [dark, peek]);
+
+  useEffect(() => () => { Brightness.restoreSystemBrightnessAsync().catch(() => {}); }, []);
+
+  useEffect(() => {
+    if (!peek) return;
+    const t = setTimeout(() => setPeek(false), 5000);
+    return () => clearTimeout(t);
+  }, [peek]);
+
+  // Back would close the app and stop the camera without the device check in stop()
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => true);
+    return () => sub.remove();
+  }, []);
+
   async function stop() {
+    try {
+      if (!(await confirmWithDevice('Stop streaming'))) return;
+    } catch (e) {
+      Alert.alert('No screen lock', `${e.message}, so anyone can stop the camera.`);
+    }
+    setDark(false);
     setCameraReady(false);
     await AsyncStorage.removeItem('role');
     router.replace('/role-picker');
@@ -212,7 +242,7 @@ export default function HomeModeScreen() {
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#111" />
+      <StatusBar barStyle="light-content" backgroundColor="#111" hidden={dark && !peek} />
       <View style={styles.statusRow}>
         <View style={[styles.onlineDot, !cameraReady && styles.offlineDot]} />
         <Text style={styles.statusText}>{status}</Text>
@@ -246,9 +276,25 @@ export default function HomeModeScreen() {
         )}
       </View>
 
+      <TouchableOpacity style={styles.darkBtn} onPress={() => { setPeek(false); setDark(true); }}>
+        <Text style={styles.darkText}>🌙 Dark mode</Text>
+      </TouchableOpacity>
       <TouchableOpacity style={styles.stopBtn} onPress={stop}>
         <Text style={styles.stopText}>Stop &amp; Switch Role</Text>
       </TouchableOpacity>
+
+      {dark && (
+        <Pressable style={styles.darkOverlay} onPress={() => setPeek(true)}>
+          {peek && (
+            <View style={styles.peekPanel}>
+              <Text style={styles.peekStatus}>{status} · streaming</Text>
+              <TouchableOpacity style={styles.darkBtn} onPress={() => { setDark(false); setPeek(false); }}>
+                <Text style={styles.darkText}>Exit dark mode</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </Pressable>
+      )}
     </View>
   );
 }
@@ -300,4 +346,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   stopText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  darkBtn: { paddingVertical: 14, paddingHorizontal: 24, borderRadius: 12, backgroundColor: '#2c2c2e', alignItems: 'center' },
+  darkText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  darkOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#000',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  peekPanel: { alignItems: 'center', gap: 16 },
+  peekStatus: { color: '#888', fontSize: 15 },
 });
